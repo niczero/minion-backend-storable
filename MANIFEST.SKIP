@@ -1,7 +1,19 @@
-^\.(?!perltidyrc)
-.*\.old$
-\.tar\.gz$
+# No private files
+^\.
+^debian
+^dep
+
+# No temp files
+~$
+\#$
+\.bak$
+\.old$
+\.rej$
+\.tmp$
+
+# No build files
+\.tar.gz$
+^blib
 ^Makefile$
 ^MYMETA\.
-^blib
 ^pm_to_blib

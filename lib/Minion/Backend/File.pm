@@ -1,5 +1,7 @@
 package Minion::Backend::File;
-use Mojo::Base 'Minion::Backend';
+use Minion::Backend -base;
+
+our $VERSION = 0.381;
 
 use IO::Compress::Gzip 'gzip';
 use IO::Uncompress::Gunzip 'gunzip';
@@ -205,7 +207,8 @@ package Minion::Backend::File::_Guard;
 use Mojo::Base -base;
 
 use Fcntl ':flock';
-use Mojo::Util qw(md5_sum slurp spurt);
+use Digest::MD5 'md5_hex';
+use Storable qw(retrieve store);
 
 sub DESTROY {
   my $self = shift;
@@ -221,29 +224,26 @@ sub new {
   return $self;
 }
 
-sub _data { $_[0]{data} //= $_[0]->_slurp }
+sub _data { $_[0]{data} //= retrieve($_[0]{backend}->file) }
 
 sub _id {
   my $self = shift;
   my $id;
-  do { $id = md5_sum(time . rand 999) }
+  do { $id = md5_hex(time . rand 999) }
     while $self->_workers->{$id} || $self->_jobs->{$id};
   return $id;
 }
 
 sub _jobs { shift->_data->{jobs} //= {} }
 
-sub _slurp { $_[0]{backend}->deserialize->(slurp $_[0]{backend}->file) }
-
-sub _spurt {
-  spurt $_[0]{backend}->serialize->($_[1]), $_[0]{backend}->file;
-}
+sub _spurt { store($_[1] => $_[0]{backend}->file) }
 
 sub _workers { shift->_data->{workers} //= {} }
 
 sub _write { ++$_[0]{write} && return $_[0] }
 
 1;
+__END__
 
 =encoding utf8
 
@@ -442,8 +442,15 @@ Unregister worker.
 
 Get information about a worker or return C<undef> if worker does not exist.
 
+=head1 COPYRIGHT AND LICENCE
+
+Copyright (c) 2014--2015 Sebastian Riedel.  All rights reserved.
+
+Copyright (c) 2016 Nic Sandfield.  All rights reserved.
+
+This program is free software, you can redistribute it and/or modify it under
+the terms of the Artistic License version 2.0.
+
 =head1 SEE ALSO
 
-L<Minion>, L<Mojolicious::Guides>, L<http://mojolicio.us>.
-
-=cut
+L<Minion>, L<Minion::Backend::Pg>, L<Minion::Backend::SQLite>.
