@@ -13,8 +13,8 @@ use Time::HiRes qw(time usleep);
 
 # Clean up before start
 my $tmpdir = tempdir CLEANUP => 1;
-my $file = catfile $tmpdir, 'minion.db';
-my $minion = Minion->new(File => $file);
+my $file = catfile $tmpdir, 'minion.data';
+my $minion = Minion->new(Storable => $file);
 $minion->reset;
 
 # Nothing to repair

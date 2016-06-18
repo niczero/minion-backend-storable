@@ -1,13 +1,11 @@
+# Minion::Backend::File [![Build Status](https://travis-ci.org/niczero/minion-backend-file.svg?branch=master)](https://travis-ci.org/niczero/minion-backend-file)
 
-# Minion [![Build Status](https://travis-ci.org/kraih/minion.svg?branch=master)](https://travis-ci.org/kraih/minion)
-
-  A job queue for the [Mojolicious](http://mojolicio.us) real-time web
-  framework with support for multiple backends.
+  A file-based backend for [Minion](https://github.com/kraih/minion).
 
 ```perl
 use Mojolicious::Lite;
 
-plugin Minion => {File => '/Users/sri/minion.data'};
+plugin Minion => {File => '/some/path/minion.data'};
 
 # Slow task
 app->minion->add_task(slow_log => sub {
@@ -26,15 +24,7 @@ get '/log' => sub {
 app->start;
 ```
 
-  Just start one or more background worker processes in addition to your web
-  server.
+Just start one or more background worker processes in addition to your web
+server.
 
-    $ ./myapp.pl minion worker
-
-## Installation
-
-  All you need is a oneliner, it takes less than a minute.
-
-    $ curl -L cpanmin.us | perl - -n Minion
-
-  We recommend the use of a [Perlbrew](http://perlbrew.pl) environment.
+  ./myapp.pl minion worker

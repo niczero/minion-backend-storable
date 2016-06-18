@@ -1,7 +1,7 @@
-package Minion::Backend::File;
+package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 5.081;
+our $VERSION = 5.082;
 
 use IO::Compress::Gzip 'gzip';
 use IO::Uncompress::Gunzip 'gunzip';
@@ -129,8 +129,8 @@ sub repair {
   for my $job (values %$jobs) {
     next unless $job->{state} eq 'finished' and $job->{finished} < $after;
     my $id = $job->{id};
-    delete $jobs->{$id}
-      unless grep +($_->{state} ne 'finished'), @{$guard->_children($id)};
+    delete $jobs->{$id} unless grep +($jobs->{$_}{state} ne 'finished'),
+        @{$guard->_children($id)};
   }
 
   # Jobs with missing worker (can be retried)
@@ -194,7 +194,7 @@ sub _deserialize {
   return thaw $uncompressed;
 }
 
-sub _guard { Minion::Backend::File::_Guard->new(backend => shift) }
+sub _guard { Minion::Backend::Storable::_Guard->new(backend => shift) }
 
 sub _serialize {
   gzip \(my $uncompressed = freeze(pop)), \my $compressed;
@@ -256,7 +256,7 @@ sub _worker_info {
   return {%$worker, jobs => \@jobs};
 }
 
-package Minion::Backend::File::_Guard;
+package Minion::Backend::Storable::_Guard;
 use Mojo::Base -base;
 
 use Fcntl ':flock';
@@ -317,22 +317,22 @@ __END__
 
 =head1 NAME
 
-Minion::Backend::File - File backend
+Minion::Backend::Storable - File backend for Minion job queues.
 
 =head1 SYNOPSIS
 
-  use Minion::Backend::File;
+  use Minion::Backend::Storable;
 
-  my $backend = Minion::Backend::File->new('/some/path/minion.db');
+  my $backend = Minion::Backend::Storable->new('/some/path/minion.data');
 
 =head1 DESCRIPTION
 
-L<Minion::Backend::File> is a highly portable file-based backend for
+L<Minion::Backend::Storable> is a highly portable file-based backend for
 L<Minion>.
 
 =head1 ATTRIBUTES
 
-L<Minion::Backend::File> inherits all attributes from L<Minion::Backend> and
+L<Minion::Backend::Storable> inherits all attributes from L<Minion::Backend> and
 implements the following new ones.
 
 =head2 deserialize
@@ -351,7 +351,7 @@ compression.
 =head2 file
 
   my $file = $backend->file;
-  $backend = $backend->file('/some/path/minion.db');
+  $backend = $backend->file('/some/path/minion.data');
 
 File all data is stored in.
 
@@ -370,7 +370,7 @@ compression.
 
 =head1 METHODS
 
-L<Minion::Backend::File> inherits all methods from L<Minion::Backend> and
+L<Minion::Backend::Storable> inherits all methods from L<Minion::Backend> and
 implements the following new ones.
 
 =head2 dequeue
@@ -640,9 +640,9 @@ Returns the same information as L</"worker_info"> but in batches.
 
 =head2 new
 
-  my $backend = Minion::Backend::File->new('/some/path/minion.db');
+  my $backend = Minion::Backend::Storable->new('/some/path/minion.data');
 
-Construct a new L<Minion::Backend::File> object.
+Construct a new L<Minion::Backend::Storable> object.
 
 =head2 register_worker
 
@@ -810,7 +810,7 @@ Epoch time worker was started.
 
 =head1 COPYRIGHT AND LICENCE
 
-Copyright (c) 2014--2015 Sebastian Riedel.
+Copyright (c) 2014 Sebastian Riedel.
 Copyright (c) 2015--2016 Sebastian Riedel & Nic Sandfield.
 
 This program is free software, you can redistribute it and/or modify it under
