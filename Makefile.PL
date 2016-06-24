@@ -14,10 +14,10 @@ WriteMakefile(
     no_index  => {directory => ['test']},
     requires  => {perl => 5.010_001},
     resources => {
-      bugtracker => 'https://github.com/niczero/minion-backend-file/issues',
+      bugtracker => 'https://github.com/niczero/minion-backend-storable/issues',
       homepage   => 'https://niczero.github.io',
       license    => 'http://www.opensource.org/licenses/artistic-license-2.0',
-      repository => 'https://github.com/niczero/minion-backend-file.git',
+      repository => 'https://github.com/niczero/minion-backend-storable.git',
       x_IRC      => 'irc://irc.perl.org/#mojo'
     }
   },

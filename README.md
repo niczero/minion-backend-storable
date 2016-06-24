@@ -1,4 +1,4 @@
-# Minion::Backend::File [![Build Status](https://travis-ci.org/niczero/minion-backend-file.svg?branch=master)](https://travis-ci.org/niczero/minion-backend-file)
+# Minion::Backend::Storable [![Build Status](https://travis-ci.org/niczero/minion-backend-storable.svg?branch=master)](https://travis-ci.org/niczero/minion-backend-storable)
 
   A file-based backend for [Minion](https://github.com/kraih/minion).
 

@@ -512,8 +512,6 @@ is $info->{state},    'failed', 'right state';
 is $info->{result}, 'Non-zero exit status (1)', 'right result';
 $worker->unregister;
 
-use Mojar::Util 'dumper';
-
 # Multiple attempts during maintenance
 $id = $minion->enqueue(exit => [] => {attempts => 2});
 $job = $worker->register->dequeue(0);

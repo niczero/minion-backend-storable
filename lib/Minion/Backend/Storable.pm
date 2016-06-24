@@ -1,7 +1,7 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 5.082;
+our $VERSION = 5.083;
 
 use IO::Compress::Gzip 'gzip';
 use IO::Uncompress::Gunzip 'gunzip';
@@ -20,7 +20,7 @@ has serialize => sub { \&_serialize };
 
 sub dequeue {
   my ($self, $id, $wait, $options) = @_;
-  usleep $wait * 1000000 unless my $job = $self->_try($id, $options);
+  usleep $wait * 1_000_000 unless my $job = $self->_try($id, $options);
   return $job || $self->_try($id, $options);
 }
 
@@ -811,6 +811,7 @@ Epoch time worker was started.
 =head1 COPYRIGHT AND LICENCE
 
 Copyright (c) 2014 Sebastian Riedel.
+
 Copyright (c) 2015--2016 Sebastian Riedel & Nic Sandfield.
 
 This program is free software, you can redistribute it and/or modify it under
