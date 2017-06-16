@@ -1,12 +1,8 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 5.091;
+our $VERSION = 5.092;
 
-use IO::Compress::Gzip 'gzip';
-use IO::Uncompress::Gunzip 'gunzip';
-use List::Util 'first';
-use Storable qw(freeze thaw);
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
 
@@ -188,17 +184,7 @@ sub unregister_worker { delete shift->_guard->_write->_workers->{shift()} }
 
 sub worker_info { $_[0]->_worker_info($_[0]->_guard, $_[1]) }
 
-sub _deserialize {
-  gunzip \(my $compressed = shift), \my $uncompressed;
-  return thaw $uncompressed;
-}
-
 sub _guard { Minion::Backend::Storable::_Guard->new(backend => shift) }
-
-sub _serialize {
-  gzip \(my $uncompressed = freeze(pop)), \my $compressed;
-  return $compressed;
-}
 
 sub _try {
   my ($self, $id, $options) = @_;
@@ -819,7 +805,7 @@ Epoch time worker was started.
 
 Copyright (c) 2014 Sebastian Riedel.
 
-Copyright (c) 2015--2016 Sebastian Riedel & Nic Sandfield.
+Copyright (c) 2015--2017 Sebastian Riedel & Nic Sandfield.
 
 This program is free software, you can redistribute it and/or modify it under
 the terms of the Artistic License version 2.0.

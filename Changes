@@ -1,6 +1,7 @@
-5.091 2017-06-15
+5.092 2017-06-16
   - Upgrade v5.08->v5.09.
     - Add enqueued_jobs to stats.
+  - Remove unused dependencies.
 
 5.084 2016-06-27
   - Make more FreeBSD-friendly.
