@@ -1,3 +1,7 @@
+6.001 2017-06-17
+  - Upgrade v5.09->v6.00.
+    - Add broadcast/receive.
+
 5.092 2017-06-16
   - Upgrade v5.08->v5.09.
     - Add enqueued_jobs to stats.

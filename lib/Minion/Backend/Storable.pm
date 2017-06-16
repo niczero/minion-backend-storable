@@ -1,7 +1,7 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 5.092;
+our $VERSION = 6.001;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
@@ -11,6 +11,20 @@ use Time::HiRes qw(time usleep);
 has 'file';
 
 # Methods
+
+sub broadcast {
+  my ($self, $command, $args, $ids) = (shift, shift, shift || [], shift || []);
+
+  my $guard = $self->_guard->_write;
+  my $inboxes = $guard->_inboxes;
+  my $workers = $guard->_workers;
+  @$ids = @$ids ? map exists($workers->{$_}), @$ids
+      : keys %$workers unless @$ids;
+
+  push @{$inboxes->{$_} ||= []}, [$command, @$args] for @$ids;
+
+  return !!@$ids;
+}
 
 sub dequeue {
   my ($self, $id, $wait, $options) = @_;
@@ -76,6 +90,15 @@ sub list_workers {
 }
 
 sub new { shift->SUPER::new(file => shift) }
+
+sub receive {
+  my ($self, $id) = @_;
+  my $guard = $self->_guard->_write;
+  my $inboxes = $guard->_inboxes;
+  my $inbox = $inboxes->{$id} || [];
+  $inboxes->{$id} = [];
+  return $inbox;
+}
 
 sub register_worker {
   my ($self, $id) = @_;
@@ -180,7 +203,12 @@ sub stats {
   };
 }
 
-sub unregister_worker { delete shift->_guard->_write->_workers->{shift()} }
+sub unregister_worker {
+  my ($self, $id) = @_;
+  my $guard = $self->_guard->_write;
+  delete $guard->_inboxes->{$id};
+  delete $guard->_workers->{$id};
+}
 
 sub worker_info { $_[0]->_worker_info($_[0]->_guard, $_[1]) }
 
@@ -280,6 +308,8 @@ sub _id {
   return $id;
 }
 
+sub _inboxes { shift->_data->{inboxes} ||= {} }
+
 sub _job {
   my ($self, $id) = (shift, shift);
   return undef unless my $job = $self->_jobs->{$id};
@@ -324,9 +354,7 @@ Minion::Backend::Storable - File backend for Minion job queues.
 L<Minion::Backend::Storable> is a highly portable file-based backend for
 L<Minion>.
 
-CAVEAT: this version is only compatible with Minion v5.
-
-  cpanm -l dep Minion@5.09
+This version supports Minion v6.00.
 
 =head1 ATTRIBUTES
 
