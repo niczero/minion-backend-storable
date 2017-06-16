@@ -1,3 +1,8 @@
+6.051 2017-06-18
+  - Upgrade v6.00->v6.05.
+    - Add status to register_worker options.
+    - Modify behaviour of retry_job.
+
 6.001 2017-06-17
   - Upgrade v5.09->v6.00.
     - Add broadcast/receive.

@@ -1,7 +1,7 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 6.001;
+our $VERSION = 6.051;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
@@ -101,14 +101,14 @@ sub receive {
 }
 
 sub register_worker {
-  my ($self, $id) = @_;
+  my ($self, $id, $options) = (shift, shift, shift || {});
   my $guard = $self->_guard->_write;
   my $worker = $id ? $guard->_workers->{$id} : undef;
   unless ($worker) {
     $worker = {host => hostname, id => $guard->_id, pid => $$, started => time};
     $guard->_workers->{$worker->{id}} = $worker;
   }
-  $worker->{notified} = time;
+  @$worker{qw(notified status)} = (time, $options->{status} || {});
   return $worker->{id};
 }
 
@@ -166,7 +166,8 @@ sub retry_job {
   my ($self, $id, $retries, $options) = (shift, shift, shift, shift || {});
 
   my $guard = $self->_guard;
-  return undef unless my $job = $guard->_job($id, 'inactive', 'failed', 'finished');
+  return undef
+    unless my $job = $guard->_job($id, qw(active failed finished inactive));
   return undef unless $job->{retries} == $retries;
   $guard->_write;
   ++$job->{retries};
@@ -313,7 +314,7 @@ sub _inboxes { shift->_data->{inboxes} ||= {} }
 sub _job {
   my ($self, $id) = (shift, shift);
   return undef unless my $job = $self->_jobs->{$id};
-  return(grep(+($job->{state} eq $_), @_) ? $job : undef);
+  return(grep(($job->{state} eq $_), @_) ? $job : undef);
 }
 
 sub _job_id {
@@ -354,7 +355,7 @@ Minion::Backend::Storable - File backend for Minion job queues.
 L<Minion::Backend::Storable> is a highly portable file-based backend for
 L<Minion>.
 
-This version supports Minion v6.00.
+This version supports Minion v6.06.
 
 =head1 ATTRIBUTES
 
@@ -454,7 +455,7 @@ L<Minion/"backoff"> after the first attempt, defaults to C<1>.
 
   delay => 10
 
-Delay job for this many seconds (from now).
+Delay job for this many seconds (from now), defaults to C<0>.
 
 =item parents
 
@@ -467,7 +468,8 @@ transitioned to the state C<finished> before it can be processed.
 
   priority => 5
 
-Job priority, defaults to C<0>.
+Job priority, defaults to C<0>.  Jobs with a higher priority get performed
+first.
 
 =item queue
 
@@ -662,8 +664,22 @@ Receive remote control commands for worker.
 
   my $worker_id = $backend->register_worker;
   my $worker_id = $backend->register_worker($worker_id);
+  my $worker_id = $backend->register_worker(
+      $worker_id, {status => {queues => ['default', 'important']}});
 
 Register worker or send heartbeat to show that this worker is still alive.
+
+These options are currently available:
+
+=over 2
+
+=item status
+
+  status => {queues => ['default', 'important']}
+
+Hash reference with whatever status information the worker would like to share.
+
+=back
 
 =head2 remove_job
 
@@ -688,8 +704,8 @@ Reset job queue.
   my $bool = $backend->retry_job($job_id, $retries);
   my $bool = $backend->retry_job($job_id, $retries, {delay => 10});
 
-Transition from C<failed> or C<finished> state back to C<inactive>, already
-C<inactive> jobs may also be retried to change options.
+Transition job back to C<inactive> state, already C<inactive> jobs may also be
+retried to change options.
 
 These options are currently available:
 
@@ -699,7 +715,7 @@ These options are currently available:
 
   delay => 10
 
-Delay job for this many seconds (from now).
+Delay job for this many seconds (from now), defaults to C<0>.
 
 =item priority
 
@@ -742,15 +758,15 @@ Number of workers that are currently processing a job.
   delayed_jobs => 100
 
 Number of jobs in C<inactive> state that are scheduled to run at specific time
-in the future or have unresolved dependencies. Note that this field is
+in the future or have unresolved dependencies.  Note that this field is
 EXPERIMENTAL and might change without warning!
 
 =item enqueued_jobs
 
   enqueued_jobs => 100000
 
-Rough estimate of how many jobs have ever been enqueued. Note that this field is
-EXPERIMENTAL and might change without warning!
+Rough estimate of how many jobs have ever been enqueued.  Note that this field
+is EXPERIMENTAL and might change without warning!
 
 =item failed_jobs
 
@@ -826,6 +842,12 @@ Process id of worker.
   started => 784111777
 
 Epoch time worker was started.
+
+=item status
+
+  status => {queues => ['default', 'important']}
+
+Hash reference with whatever status information the worker would like to share.
 
 =back
 
