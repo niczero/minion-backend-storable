@@ -1,7 +1,7 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 6.051;
+our $VERSION = 6.061;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
@@ -135,10 +135,9 @@ sub repair {
   for my $job (values %$jobs) {
     next unless $job->{parents} and $job->{state} eq 'inactive';
     my $missing;
-    for my $p (@{$job->{parents}}) {
-      ++$missing and last unless exists $jobs->{$job->{id}};
-    }
-    @$job{qw(finished result state)} = (time, 'Parent went away', 'failed');
+    exists $jobs->{$_} or ++$missing and last for @{$job->{parents}};
+    @$job{qw(finished result state)} = (time, 'Parent went away', 'failed')
+      if $missing;
   }
 
   # Old jobs without unfinished dependents

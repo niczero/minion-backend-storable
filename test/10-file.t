@@ -647,6 +647,23 @@ is $minion->job($id)->info->{state},  'failed',           'right state';
 is $minion->job($id)->info->{result}, 'Parent went away', 'right result';
 $worker->unregister;
 
+# Repair orphaned jobs
+$worker = $minion->remove_after(20)->worker->register;
+#$worker = $minion->worker->register;
+$id  = $minion->enqueue('test');
+$id2 = $minion->enqueue('test');
+$id3 = $minion->enqueue(test => [] => {parents => [$id, $id2]});
+is $minion->stats->{delayed_jobs}, 1, 'one delayed job';
+my $quantity_failed = $minion->stats->{failed_jobs};
+$minion->repair;
+is $minion->stats->{delayed_jobs}, 1, 'one delayed job';
+is $minion->stats->{failed_jobs}, $quantity_failed, 'unchanged failed jobs';
+ok $minion->backend->remove_job($id2), 'removed parent job';
+$minion->repair;
+is $minion->stats->{delayed_jobs}, 0, 'no delayed job';
+is $minion->stats->{failed_jobs}, $quantity_failed + 1, 'one more failed job';
+$worker->unregister;
+
 # Worker remote control commands
 $worker  = $minion->worker->register->process_commands;
 $worker2 = $minion->worker->register;

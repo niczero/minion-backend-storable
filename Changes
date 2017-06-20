@@ -1,3 +1,6 @@
+6.061 2017-06-20
+  - Fix repair for dependent jobs (#8, Manuel Mausz).
+
 6.051 2017-06-18
   - Upgrade v6.00->v6.05.
     - Add status to register_worker options.
