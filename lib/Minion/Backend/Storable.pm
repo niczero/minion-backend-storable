@@ -5,6 +5,7 @@ our $VERSION = 6.051;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
+use List::Util 'any';
 
 # Attributes
 
@@ -73,9 +74,9 @@ sub list_jobs {
 
   my $guard = $self->_guard;
   my @jobs = sort { $b->{created} <=> $a->{created} }
-  grep +( (not exists $options->{queue} or $_->{queue} eq $options->{queue})
-      and (not exists $options->{state} or $_->{state} eq $options->{state})
-      and (not exists $options->{task}  or $_->{task} eq $options->{task})
+  grep +( (not defined $options->{queue} or $_->{queue} eq $options->{queue})
+      and (not defined $options->{state} or $_->{state} eq $options->{state})
+      and (not defined $options->{task}  or $_->{task} eq $options->{task})
   ), values %{$guard->_jobs};
 
   return [map +($_->{children} = $guard->_children($_->{id}) and $_), grep defined, @jobs[$offset .. ($offset + $limit - 1)]];
@@ -133,11 +134,8 @@ sub repair {
 
   # Jobs with missing parents (cannot be retried)
   for my $job (values %$jobs) {
-    next unless $job->{parents} and $job->{state} eq 'inactive';
-    my $missing;
-    for my $p (@{$job->{parents}}) {
-      ++$missing and last unless exists $jobs->{$job->{id}};
-    }
+    next unless $job->{state} eq 'inactive' and
+        any { not exists $jobs->{$_} } @{$job->{parents}};
     @$job{qw(finished result state)} = (time, 'Parent went away', 'failed');
   }
 
