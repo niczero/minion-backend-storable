@@ -5,6 +5,7 @@ our $VERSION = 6.051;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
+use List::Util 'any';
 
 # Attributes
 
@@ -133,11 +134,8 @@ sub repair {
 
   # Jobs with missing parents (cannot be retried)
   for my $job (values %$jobs) {
-    next unless $job->{parents} and $job->{state} eq 'inactive';
-    my $missing;
-    for my $p (@{$job->{parents}}) {
-      ++$missing and last unless exists $jobs->{$job->{id}};
-    }
+    next unless $job->{state} eq 'inactive' and
+        any { not exists $jobs->{$_} } @{$job->{parents}};
     @$job{qw(finished result state)} = (time, 'Parent went away', 'failed');
   }
 
