@@ -73,9 +73,9 @@ sub list_jobs {
 
   my $guard = $self->_guard;
   my @jobs = sort { $b->{created} <=> $a->{created} }
-  grep +( (not exists $options->{queue} or $_->{queue} eq $options->{queue})
-      and (not exists $options->{state} or $_->{state} eq $options->{state})
-      and (not exists $options->{task}  or $_->{task} eq $options->{task})
+  grep +( (not defined $options->{queue} or $_->{queue} eq $options->{queue})
+      and (not defined $options->{state} or $_->{state} eq $options->{state})
+      and (not defined $options->{task}  or $_->{task} eq $options->{task})
   ), values %{$guard->_jobs};
 
   return [map +($_->{children} = $guard->_children($_->{id}) and $_), grep defined, @jobs[$offset .. ($offset + $limit - 1)]];
