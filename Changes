@@ -1,5 +1,6 @@
-6.061 2017-06-20
+6.071 2017-06-20
   - Fix repair for dependent jobs (#8, Manuel Mausz).
+  - Fix list_jobs for undefined params (#7, Manuel Mausz).
 
 6.051 2017-06-18
   - Upgrade v6.00->v6.05.

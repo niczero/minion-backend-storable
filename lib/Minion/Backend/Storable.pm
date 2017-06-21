@@ -1,7 +1,7 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 6.061;
+our $VERSION = 6.071;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
@@ -858,6 +858,16 @@ Copyright (c) 2015--2017 Sebastian Riedel & Nic Sandfield.
 
 This program is free software, you can redistribute it and/or modify it under
 the terms of the Artistic License version 2.0.
+
+=head1 CONTRIBUTORS
+
+=over 2
+
+=item Manuel Mausz (manuelm@github)
+
+=item Nils Diewald (Akron@github)
+
+=back
 
 =head1 SEE ALSO
 
