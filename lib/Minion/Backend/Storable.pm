@@ -1,7 +1,7 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 6.071;
+our $VERSION = 6.081;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
@@ -13,7 +13,7 @@ has 'file';
 # Methods
 
 sub broadcast {
-  my ($self, $command, $args, $ids) = (shift, shift, shift || [], shift || []);
+  my ($self, $command, $args, $ids) = (shift, shift, shift // [], shift // []);
 
   my $guard = $self->_guard->_write;
   my $inboxes = $guard->_inboxes;
@@ -21,19 +21,21 @@ sub broadcast {
   @$ids = @$ids ? map exists($workers->{$_}), @$ids
       : keys %$workers unless @$ids;
 
-  push @{$inboxes->{$_} ||= []}, [$command, @$args] for @$ids;
+  push @{$inboxes->{$_} //= []}, [$command, @$args] for @$ids;
 
   return !!@$ids;
 }
 
 sub dequeue {
   my ($self, $id, $wait, $options) = @_;
-  usleep $wait * 1_000_000 unless my $job = $self->_try($id, $options);
-  return $job || $self->_try($id, $options);
+  return ($self->_try($id, $options) or do {
+    usleep $wait * 1_000_000;
+    $self->_try($id, $options);
+  });
 }
 
 sub enqueue {
-  my ($self, $task, $args, $options) = (shift, shift, shift || [], shift || {});
+  my ($self, $task, $args, $options) = (shift, shift, shift // [], shift // {});
 
   my $guard = $self->_guard->_write;
 
@@ -43,7 +45,7 @@ sub enqueue {
     created  => time,
     delayed  => time + ($options->{delay} // 0),
     id       => $guard->_job_id,
-    parents  => $options->{parents} || [],
+    parents  => $options->{parents} // [],
     priority => $options->{priority} // 0,
     queue    => $options->{queue} // 'default',
     retries  => 0,
@@ -95,20 +97,20 @@ sub receive {
   my ($self, $id) = @_;
   my $guard = $self->_guard->_write;
   my $inboxes = $guard->_inboxes;
-  my $inbox = $inboxes->{$id} || [];
+  my $inbox = $inboxes->{$id} // [];
   $inboxes->{$id} = [];
   return $inbox;
 }
 
 sub register_worker {
-  my ($self, $id, $options) = (shift, shift, shift || {});
+  my ($self, $id, $options) = (shift, shift, shift // {});
   my $guard = $self->_guard->_write;
   my $worker = $id ? $guard->_workers->{$id} : undef;
   unless ($worker) {
     $worker = {host => hostname, id => $guard->_id, pid => $$, started => time};
     $guard->_workers->{$worker->{id}} = $worker;
   }
-  @$worker{qw(notified status)} = (time, $options->{status} || {});
+  @$worker{qw(notified status)} = (time, $options->{status} // {});
   return $worker->{id};
 }
 
@@ -159,10 +161,10 @@ sub repair {
   return;
 }
 
-sub reset { shift->_guard->_spurt({}) }
+sub reset { shift->_guard->_save({}) }
 
 sub retry_job {
-  my ($self, $id, $retries, $options) = (shift, shift, shift, shift || {});
+  my ($self, $id, $retries, $options) = (shift, shift, shift, shift // {});
 
   my $guard = $self->_guard;
   return undef
@@ -217,7 +219,7 @@ sub _guard { Minion::Backend::Storable::_Guard->new(backend => shift) }
 sub _try {
   my ($self, $id, $options) = @_;
   my $tasks = $self->minion->tasks;
-  my %queues = map +($_ => 1), @{$options->{queues} || ['default']};
+  my %queues = map +($_ => 1), @{$options->{queues} // ['default']};
 
   my $now = time;
   my $guard = $self->_guard;
@@ -231,7 +233,7 @@ sub _try {
   my $job;
   CANDIDATE: for my $candidate (@ready) {
     $job = $candidate and last
-      unless my @parents = @{$candidate->{parents} || []};
+      unless my @parents = @{$candidate->{parents} // []};
     ($jobs->{$_}{state} // '') ne 'finished' and next CANDIDATE for @parents;
     $job = $candidate;
   }
@@ -274,17 +276,17 @@ use Mojo::Base -base;
 
 use Fcntl ':flock';
 use Digest::MD5 'md5_hex';
-use Storable qw(retrieve store);
+use Storable ();
 
 sub DESTROY {
   my $self = shift;
-  $self->_spurt($self->_data) if $self->{write};
+  $self->_save($self->_data) if $self->{write};
   flock $self->{lock}, LOCK_UN;
 }
 
 sub new {
   my $self = shift->SUPER::new(@_);
-  $self->_spurt({}) unless -f (my $file = $self->{backend}->file);
+  $self->_save({}) unless -f (my $file = $self->{backend}->file);
   open $self->{lock}, '>', "$file.lock";
   flock $self->{lock}, LOCK_EX;
   return $self;
@@ -294,12 +296,12 @@ sub _children {
   my ($self, $id) = @_;
   my $children = [];
   for my $job (values %{$self->_jobs}) {
-    push @$children, $job->{id} if grep +($_ eq $id), @{$job->{parents} || []};
+    push @$children, $job->{id} if grep +($_ eq $id), @{$job->{parents} // []};
   }
   return $children;
 }
 
-sub _data { $_[0]{data} ||= retrieve($_[0]{backend}->file) }
+sub _data { $_[0]{data} //= $_[0]->_load($_[0]{backend}->file) }
 
 sub _id {
   my $self = shift;
@@ -308,7 +310,7 @@ sub _id {
   return $id;
 }
 
-sub _inboxes { shift->_data->{inboxes} ||= {} }
+sub _inboxes { shift->_data->{inboxes} //= {} }
 
 sub _job {
   my ($self, $id) = (shift, shift);
@@ -326,11 +328,13 @@ sub _job_id {
 
 sub _job_count { shift->_data->{job_count} //= 0 }
 
-sub _jobs { shift->_data->{jobs} ||= {} }
+sub _jobs { shift->_data->{jobs} //= {} }
 
-sub _spurt { store($_[1] => $_[0]{backend}->file) }
+sub _load { Storable::retrieve($_[1]) }
 
-sub _workers { shift->_data->{workers} ||= {} }
+sub _save { Storable::store($_[1] => $_[0]{backend}->file) }
+
+sub _workers { shift->_data->{workers} //= {} }
 
 sub _write { ++$_[0]{write} && return $_[0] }
 

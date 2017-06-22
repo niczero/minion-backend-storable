@@ -3,10 +3,10 @@ use Mojo::Base -strict;
 use Minion;
 use Time::HiRes 'time';
 
-my $ENQUEUE     = 2000;
-my $DEQUEUE     = 200;
+my $DEQUEUE     = 400;
 my $REPETITIONS = 2;
 my $WORKERS     = 2;
+my $ENQUEUE     = $DEQUEUE * $REPETITIONS * $WORKERS + 1_000;
 my $STATS       = 100;
 my $REPAIR      = 100;
 my $INFO        = 100;

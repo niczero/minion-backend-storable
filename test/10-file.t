@@ -1,14 +1,12 @@
 use Mojo::Base -strict;
+use Test::More;
 
 BEGIN { $ENV{MOJO_REACTOR} = 'Mojo::Reactor::Poll' }
-
-use Test::More;
 
 use File::Spec::Functions 'catfile';
 use File::Temp 'tempdir';
 use Minion;
 use Mojo::IOLoop;
-use Mojo::Util 'dumper';
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
 
@@ -693,5 +691,5 @@ $_->unregister for $worker, $worker2;
 ok !$minion->backend->broadcast('test_id', []), 'command not sent';
 
 # Clean up once we are done
-$minion->backend->reset;
+$minion->reset;
 done_testing();
