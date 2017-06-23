@@ -1,7 +1,7 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 6.101;
+our $VERSION = 7.001;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
@@ -9,6 +9,10 @@ use Time::HiRes qw(time usleep);
 # Attributes
 
 has 'file';
+
+# Constructor
+
+sub new { shift->SUPER::new(file => shift) }
 
 # Methods
 
@@ -91,7 +95,29 @@ sub list_workers {
   return [grep {defined} @workers[$offset .. ($offset + $limit - 1)]];
 }
 
-sub new { shift->SUPER::new(file => shift) }
+sub lock {
+  my ($self, $name, $duration, $options) = (shift, shift, shift, shift // {});
+  my $limit = $options->{limit} || 1;
+
+  my $guard = $self->_guard->_write;
+  my $locks = $guard->_locks->{$name} //= [];
+
+  # Delete expired locks
+  my $now = time;
+  @$locks = grep +($now < ($_ // 0)), @$locks;
+
+  # Check capacity
+  return undef unless @$locks < $limit;
+
+  # Add lock, maintaining order
+  my $this_expires = $now + $duration;
+
+  push(@$locks, $this_expires) and return 1
+    if ($locks->[$#$locks] // 0) < $this_expires;
+
+  @$locks = sort { ($a // 0) <=> ($b // 0) } (@$locks, $this_expires);
+  return 1;
+}
 
 sub receive {
   my ($self, $id) = @_;
@@ -133,22 +159,12 @@ sub repair {
   my $after   = time - $minion->missing_after;
   $_->{notified} < $after and delete $workers->{$_->{id}} for values %$workers;
 
-  # Jobs with missing parents (cannot be retried)
-  for my $job (values %$jobs) {
-    next unless $job->{parents} and $job->{state} eq 'inactive';
-    my $missing;
-    exists $jobs->{$_} or ++$missing and last for @{$job->{parents}};
-    @$job{qw(finished result state)} = (time, 'Parent went away', 'failed')
-      if $missing;
-  }
-
   # Old jobs without unfinished dependents
   $after = time - $minion->remove_after;
   for my $job (values %$jobs) {
     next unless $job->{state} eq 'finished' and $job->{finished} <= $after;
-    my $id = $job->{id};
-    delete $jobs->{$id} unless grep +($jobs->{$_}{state} ne 'finished'),
-        @{$guard->_children($id)};
+    delete $jobs->{$job->{id}} unless grep +($jobs->{$_}{state} ne 'finished'),
+        @{$guard->_children($job->{id})};
   }
 
   # Jobs with missing worker (can be retried)
@@ -205,6 +221,22 @@ sub stats {
   };
 }
 
+sub unlock {
+  my ($self, $name) = @_;
+
+  my $guard = $self->_guard->_write;
+  my $locks = $guard->_locks->{$name} //= [];
+  my $length = @$locks;
+  my $now = time;
+
+  my $i = 0;
+  ++$i while $i < $length and ($locks->[$i] // 0) <= $now;
+  return undef if $i >= $length;
+
+  $locks->[$i] = undef;
+  return 1;
+}
+
 sub unregister_worker {
   my ($self, $id) = @_;
   my $guard = $self->_guard->_write;
@@ -224,19 +256,23 @@ sub _try {
   my $now = time;
   my $guard = $self->_guard;
   my $jobs = $guard->_jobs;
-  my @ready = sort {
-      $b->{priority} <=> $a->{priority} || $a->{created} <=> $b->{created} }
+  my @ready = sort { $b->{priority} <=> $a->{priority}
+        || $a->{created} <=> $b->{created} }
     grep +($_->{state} eq 'inactive' and $queues{$_->{queue}}
-      and $tasks->{$_->{task}} and $_->{delayed} < $now),
-    values %{$jobs};
+        and $tasks->{$_->{task}} and $_->{delayed} <= $now),
+    values %$jobs;
 
   my $job;
   CANDIDATE: for my $candidate (@ready) {
-    $job = $candidate and last
+    $job = $candidate and last CANDIDATE
       unless my @parents = @{$candidate->{parents} // []};
-    ($jobs->{$_}{state} // '') ne 'finished' and next CANDIDATE for @parents;
+    for my $parent (@parents) {
+      next CANDIDATE if exists $jobs->{$parent}
+          and grep +($jobs->{$parent}{state} eq $_), qw(active failed inactive)
+    }
     $job = $candidate;
   }
+
   return undef unless $job;
   $guard->_write;
   @$job{qw(started state worker)} = (time, 'active', $id);
@@ -271,7 +307,8 @@ sub _worker_info {
   return {%$worker, jobs => \@jobs};
 }
 
-package Minion::Backend::Storable::_Guard;
+package
+    Minion::Backend::Storable::_Guard;
 use Mojo::Base -base;
 
 use Fcntl ':flock';
@@ -311,38 +348,38 @@ sub _id {
   return $id;
 }
 
-sub _inboxes { shift->_data->{inboxes} //= {} }
+sub _inboxes { $_[0]->_data->{inboxes} //= {} }
 
 sub _job {
   my ($self, $id) = (shift, shift);
   return undef unless my $job = $self->_jobs->{$id};
-  return(grep(($job->{state} eq $_), @_) ? $job : undef);
+  return grep(($job->{state} eq $_), @_) ? $job : undef;
 }
 
+sub _job_count { $_[0]->_data->{job_count} //= 0 }
+
 sub _job_id {
-  my $self = shift;
+  my ($self) = @_;
   my $id;
   do { $id = md5_hex(time . rand 999) } while $self->_jobs->{$id};
   ++$self->_data->{job_count};
   return $id;
 }
 
-sub _job_count { shift->_data->{job_count} //= 0 }
-
-sub _jobs { shift->_data->{jobs} //= {} }
+sub _jobs { $_[0]->_data->{jobs} //= {} }
 
 sub _load { Storable::retrieve($_[1]) }
 
+sub _locks { $_[0]->_data->{locks} //= {} }
+
 sub _save { Storable::store($_[1] => $_[2]) }
 
-sub _workers { shift->_data->{workers} //= {} }
+sub _workers { $_[0]->_data->{workers} //= {} }
 
 sub _write { ++$_[0]{write} && return $_[0] }
 
 1;
 __END__
-
-=encoding utf8
 
 =head1 NAME
 
@@ -359,7 +396,7 @@ Minion::Backend::Storable - File backend for Minion job queues.
 L<Minion::Backend::Storable> is a highly portable file-based backend for
 L<Minion>.
 
-This version supports Minion v6.06.
+This version supports Minion v7.00.
 
 =head1 ATTRIBUTES
 
@@ -652,6 +689,27 @@ List only jobs for this task.
 
 Returns the same information as L</"worker_info"> but in batches.
 
+=head2 lock
+
+  my $bool = $backend->lock('foo', 3600);
+  my $bool = $backend->lock('foo', 3600, {limit => 20});
+
+Try to acquire a named lock that will expire automatically after the given
+amount of time in seconds.
+
+These options are currently available:
+
+=over 2
+
+=item limit
+
+  limit => 20
+
+Number of shared locks with the same name that can be active at the same time,
+defaults to C<1>.
+
+=back
+
 =head2 new
 
   my $backend = Minion::Backend::Storable->new('/some/path/minion.data');
@@ -797,6 +855,12 @@ Number of jobs in C<inactive> state.
 Number of workers that are currently not processing a job.
 
 =back
+
+=head2 unlock
+
+  my $bool = $backend->unlock('foo');
+
+Release a named lock.
 
 =head2 unregister_worker
 

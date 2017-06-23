@@ -2,10 +2,11 @@ use Mojo::Base -strict;
 use Test::More;
 
 use_ok 'Minion';
-diag "Testing Minion $Minion::VERSION, Perl $], $^X";
 use_ok 'Minion::Backend::Storable';
+diag "Testing Minion::Backend::Storable $Minion::Backend::Storable::VERSION";
+diag "  with Minion $Minion::VERSION, Perl $], $^X";
 
-like(Minion->VERSION, qr/^6\./, 'compatible version of Minion')
-  or diag ' ** Compatible with Minion v6 only ** ';
+like(Minion->VERSION, qr/^7\./, 'compatible version of Minion')
+  or diag ' ** Compatible with Minion v7 only ** ';
 
 done_testing();

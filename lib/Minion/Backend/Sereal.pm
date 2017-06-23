@@ -1,7 +1,7 @@
 package Minion::Backend::Sereal;
 use Minion::Backend -base;
 
-our $VERSION = 6.101;
+our $VERSION = 7.001;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
@@ -9,6 +9,10 @@ use Time::HiRes qw(time usleep);
 # Attributes
 
 has 'file';
+
+# Constructor
+
+sub new { shift->SUPER::new(file => shift) }
 
 # Methods
 
@@ -91,7 +95,29 @@ sub list_workers {
   return [grep {defined} @workers[$offset .. ($offset + $limit - 1)]];
 }
 
-sub new { shift->SUPER::new(file => shift) }
+sub lock {
+  my ($self, $name, $duration, $options) = (shift, shift, shift, shift // {});
+  my $limit = $options->{limit} || 1;
+
+  my $guard = $self->_guard->_write;
+  my $locks = $guard->_locks->{$name} //= [];
+
+  # Delete expired locks
+  my $now = time;
+  @$locks = grep +($now < ($_ // 0)), @$locks;
+
+  # Check capacity
+  return undef unless @$locks < $limit;
+
+  # Add lock, maintaining order
+  my $this_expires = $now + $duration;
+
+  push(@$locks, $this_expires) and return 1
+    if ($locks->[$#$locks] // 0) < $this_expires;
+
+  @$locks = sort { ($a // 0) <=> ($b // 0) } (@$locks, $this_expires);
+  return 1;
+}
 
 sub receive {
   my ($self, $id) = @_;
@@ -133,22 +159,12 @@ sub repair {
   my $after   = time - $minion->missing_after;
   $_->{notified} < $after and delete $workers->{$_->{id}} for values %$workers;
 
-  # Jobs with missing parents (cannot be retried)
-  for my $job (values %$jobs) {
-    next unless $job->{parents} and $job->{state} eq 'inactive';
-    my $missing;
-    exists $jobs->{$_} or ++$missing and last for @{$job->{parents}};
-    @$job{qw(finished result state)} = (time, 'Parent went away', 'failed')
-      if $missing;
-  }
-
   # Old jobs without unfinished dependents
   $after = time - $minion->remove_after;
   for my $job (values %$jobs) {
     next unless $job->{state} eq 'finished' and $job->{finished} <= $after;
-    my $id = $job->{id};
-    delete $jobs->{$id} unless grep +($jobs->{$_}{state} ne 'finished'),
-        @{$guard->_children($id)};
+    delete $jobs->{$job->{id}} unless grep +($jobs->{$_}{state} ne 'finished'),
+        @{$guard->_children($job->{id})};
   }
 
   # Jobs with missing worker (can be retried)
@@ -205,6 +221,22 @@ sub stats {
   };
 }
 
+sub unlock {
+  my ($self, $name) = @_;
+
+  my $guard = $self->_guard->_write;
+  my $locks = $guard->_locks->{$name} //= [];
+  my $length = @$locks;
+  my $now = time;
+
+  my $i = 0;
+  ++$i while $i < $length and ($locks->[$i] // 0) <= $now;
+  return undef if $i >= $length;
+
+  $locks->[$i] = undef;
+  return 1;
+}
+
 sub unregister_worker {
   my ($self, $id) = @_;
   my $guard = $self->_guard->_write;
@@ -224,19 +256,23 @@ sub _try {
   my $now = time;
   my $guard = $self->_guard;
   my $jobs = $guard->_jobs;
-  my @ready = sort {
-      $b->{priority} <=> $a->{priority} || $a->{created} <=> $b->{created} }
+  my @ready = sort { $b->{priority} <=> $a->{priority}
+        || $a->{created} <=> $b->{created} }
     grep +($_->{state} eq 'inactive' and $queues{$_->{queue}}
-      and $tasks->{$_->{task}} and $_->{delayed} < $now),
-    values %{$jobs};
+        and $tasks->{$_->{task}} and $_->{delayed} <= $now),
+    values %$jobs;
 
   my $job;
   CANDIDATE: for my $candidate (@ready) {
-    $job = $candidate and last
+    $job = $candidate and last CANDIDATE
       unless my @parents = @{$candidate->{parents} // []};
-    ($jobs->{$_}{state} // '') ne 'finished' and next CANDIDATE for @parents;
+    for my $parent (@parents) {
+      next CANDIDATE if exists $jobs->{$parent}
+          and grep +($jobs->{$parent}{state} eq $_), qw(active failed inactive)
+    }
     $job = $candidate;
   }
+
   return undef unless $job;
   $guard->_write;
   @$job{qw(started state worker)} = (time, 'active', $id);
@@ -298,8 +334,7 @@ sub _children {
   my ($self, $id) = @_;
   my $children = [];
   for my $job (values %{$self->_jobs}) {
-    push @$children, $job->{id}
-      if grep +($_ eq $id), @{$job->{parents} // []};
+    push @$children, $job->{id} if grep +($_ eq $id), @{$job->{parents} // []};
   }
   return $children;
 }
@@ -315,10 +350,12 @@ sub _id {
 sub _inboxes { $_[0]->_data->{inboxes} //= {} }
 
 sub _job {
-  my ($self, $id) = @_;
+  my ($self, $id) = (shift, shift);
   return undef unless my $job = $self->_jobs->{$id};
-  return(grep(($job->{state} eq $_), @_) ? $job : undef);
+  return grep(($job->{state} eq $_), @_) ? $job : undef;
 }
+
+sub _job_count { $_[0]->_data->{job_count} //= 0 }
 
 sub _job_id {
   my $id;
@@ -326,8 +363,6 @@ sub _job_id {
   ++$_[0]->_data->{job_count};
   return $id;
 }
-
-sub _job_count { $_[0]->_data->{job_count} //= 0 }
 
 sub _jobs { $_[0]->_data->{jobs} //= {} }
 
@@ -343,6 +378,8 @@ sub _load {
 
   return sereal_decode_with_object $decoder, $payload;
 }
+
+sub _locks { shift->_data->{locks} //= {} }
 
 sub _save {
   my ($self, $content, $path) = @_;
@@ -379,7 +416,7 @@ L<Minion::Backend::Sereal> is a highly portable file-based backend for
 L<Minion>.  It is 2--3x as fast as the L<Storable|Minion::Backend::Storable>
 backend.
 
-This version supports Minion v6.06.
+This version supports Minion v7.00.
 
 =head1 ATTRIBUTES
 
@@ -672,6 +709,27 @@ List only jobs for this task.
 
 Returns the same information as L</"worker_info"> but in batches.
 
+=head2 lock
+
+  my $bool = $backend->lock('foo', 3600);
+  my $bool = $backend->lock('foo', 3600, {limit => 20});
+
+Try to acquire a named lock that will expire automatically after the given
+amount of time in seconds.
+
+These options are currently available:
+
+=over 2
+
+=item limit
+
+  limit => 20
+
+Number of shared locks with the same name that can be active at the same time,
+defaults to C<1>.
+
+=back
+
 =head2 new
 
   my $backend = Minion::Backend::Sereal->new('/some/path/minion.data');
@@ -818,6 +876,12 @@ Number of workers that are currently not processing a job.
 
 =back
 
+=head2 unlock
+
+  my $bool = $backend->unlock('foo');
+
+Release a named lock.
+
 =head2 unregister_worker
 
   $backend->unregister_worker($worker_id);
@@ -877,7 +941,7 @@ Hash reference with whatever status information the worker would like to share.
 
 =head1 COPYRIGHT AND LICENCE
 
-Copyright (c) 2014 Sebastian Riedel.
+Copyright (c) 2014 L<Sebastian Riedel|https://github.com/kraih>.
 
 Copyright (c) 2015--2017 Sebastian Riedel & Nic Sandfield.
 

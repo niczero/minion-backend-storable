@@ -108,9 +108,39 @@ ok !$batch->[1], 'no more results';
 $worker->unregister;
 $worker2->unregister;
 
+# Exclusive lock
+ok $minion->lock('foo', 3600), 'locked';
+ok !$minion->lock('foo', 3600), 'not locked again';
+ok $minion->unlock('foo'), 'unlocked';
+ok !$minion->unlock('foo'), 'not unlocked again';
+ok $minion->lock('foo', -3600), 'locked';
+ok $minion->lock('foo', 3600),  'locked again';
+ok !$minion->lock('foo', 3600), 'not locked again';
+ok $minion->unlock('foo'), 'unlocked';
+ok !$minion->unlock('foo'), 'not unlocked again';
+ok $minion->lock('yada', 3600, {limit => 1}), 'locked';
+ok !$minion->lock('yada', 3600, {limit => 1}), 'not locked again';
+
+# Shared lock
+ok $minion->lock('bar', 3600,  {limit => 3}), 'locked';
+ok $minion->lock('bar', 3600,  {limit => 3}), 'locked again';
+ok $minion->lock('bar', -3600, {limit => 3}), 'locked again';
+ok $minion->lock('bar', 3600,  {limit => 3}), 'locked again';
+ok !$minion->lock('bar', 3600, {limit => 2}), 'not locked again';
+ok $minion->lock('baz', 3600, {limit => 3}), 'locked';
+ok $minion->unlock('bar'), 'unlocked';
+ok $minion->lock('bar', 3600, {limit => 3}), 'locked again';
+ok $minion->unlock('bar'), 'unlocked again';
+ok $minion->unlock('bar'), 'unlocked again';
+ok $minion->unlock('bar'), 'unlocked again';
+ok !$minion->unlock('bar'), 'not unlocked again';
+ok $minion->unlock('baz'), 'unlocked';
+ok !$minion->unlock('baz'), 'not unlocked again';
+
 # Reset
 $minion->reset->repair;
 ok !keys %{$minion->backend->_guard->_jobs},    'no jobs';
+ok !keys %{$minion->backend->_guard->_locks},   'no locks';
 ok !keys %{$minion->backend->_guard->_workers}, 'no workers';
 
 # Wait for job
@@ -637,29 +667,25 @@ ok $job->finish, 'job finished';
 is $minion->stats->{finished_jobs}, 3, 'three finished jobs';
 is $minion->repair->stats->{finished_jobs}, 0, 'no finished jobs';
 $id = $minion->enqueue(test => [] => {parents => [-1]});
-ok !$worker->dequeue(0), 'job with missing parent will never be ready';
-$minion->repair;
-like $minion->job($id)->info->{finished}, qr/^[\d.]+$/,
-  'has finished timestamp';
-is $minion->job($id)->info->{state},  'failed',           'right state';
-is $minion->job($id)->info->{result}, 'Parent went away', 'right result';
+$job = $worker->dequeue(0);
+is $job->id, $id, 'right id';
+ok $job->finish, 'job finished';
 $worker->unregister;
 
-# Repair orphaned jobs
+# Missing parent
 $worker = $minion->remove_after(20)->worker->register;
-#$worker = $minion->worker->register;
 $id  = $minion->enqueue('test');
 $id2 = $minion->enqueue('test');
 $id3 = $minion->enqueue(test => [] => {parents => [$id, $id2]});
+$job = $worker->dequeue(0);
+is $job->id, $id, 'right id';
+ok $job->finish, 'one parent finished';
 is $minion->stats->{delayed_jobs}, 1, 'one delayed job';
-my $quantity_failed = $minion->stats->{failed_jobs};
-$minion->repair;
-is $minion->stats->{delayed_jobs}, 1, 'one delayed job';
-is $minion->stats->{failed_jobs}, $quantity_failed, 'unchanged failed jobs';
-ok $minion->backend->remove_job($id2), 'removed parent job';
-$minion->repair;
+ok $minion->backend->remove_job($id2), 'other parent removed';
+$job3 = $worker->dequeue(0);
 is $minion->stats->{delayed_jobs}, 0, 'no delayed job';
-is $minion->stats->{failed_jobs}, $quantity_failed + 1, 'one more failed job';
+is $job3->id, $id3, 'right id';
+ok $job3->finish, 'child finished';
 $worker->unregister;
 
 # Worker remote control commands
