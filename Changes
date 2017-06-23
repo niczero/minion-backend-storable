@@ -1,3 +1,6 @@
+6.101 2017-06-23
+  - Add Sereal backend.
+
 6.081 2017-06-22
   - Fix README :bug:
   - Test Minion version.

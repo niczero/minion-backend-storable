@@ -1,4 +1,4 @@
-package Minion::Backend::Storable;
+package Minion::Backend::Sereal;
 use Minion::Backend -base;
 
 our $VERSION = 6.101;
@@ -214,7 +214,7 @@ sub unregister_worker {
 
 sub worker_info { $_[0]->_worker_info($_[0]->_guard, $_[1]) }
 
-sub _guard { Minion::Backend::Storable::_Guard->new(backend => shift) }
+sub _guard { Minion::Backend::Sereal::_Guard->new(backend => shift) }
 
 sub _try {
   my ($self, $id, $options) = @_;
@@ -271,22 +271,23 @@ sub _worker_info {
   return {%$worker, jobs => \@jobs};
 }
 
-package Minion::Backend::Storable::_Guard;
+package
+    Minion::Backend::Sereal::_Guard;
 use Mojo::Base -base;
 
 use Fcntl ':flock';
 use Digest::MD5 'md5_hex';
-use Storable ();
+use Sereal::Decoder 'sereal_decode_with_object';
+use Sereal::Encoder 'sereal_encode_with_object';
 
 sub DESTROY {
-  my $self = shift;
-  $self->_save($self->_data => $self->{backend}->file) if $self->{write};
-  flock $self->{lock}, LOCK_UN;
+  $_[0]->_save($_[0]->_data => $_[0]{backend}{file}) if $_[0]{write};
+  flock $_[0]{lock}, LOCK_UN;
 }
 
 sub new {
   my $self = shift->SUPER::new(@_);
-  my $path = $self->{backend}->file;
+  my $path = $self->{backend}{file};
   $self->_save({} => $path) unless -f $path;
   open $self->{lock}, '>', "$path.lock";
   flock $self->{lock}, LOCK_EX;
@@ -297,73 +298,92 @@ sub _children {
   my ($self, $id) = @_;
   my $children = [];
   for my $job (values %{$self->_jobs}) {
-    push @$children, $job->{id} if grep +($_ eq $id), @{$job->{parents} // []};
+    push @$children, $job->{id}
+      if grep +($_ eq $id), @{$job->{parents} // []};
   }
   return $children;
 }
 
-sub _data { $_[0]{data} //= $_[0]->_load($_[0]{backend}->file) }
+sub _data { $_[0]{data} //= $_[0]->_load($_[0]{backend}{file}) }
 
 sub _id {
-  my $self = shift;
   my $id;
-  do { $id = md5_hex(time . rand 999) } while $self->_workers->{$id};
+  do { $id = md5_hex(time . rand 999) } while $_[0]->_workers->{$id};
   return $id;
 }
 
-sub _inboxes { shift->_data->{inboxes} //= {} }
+sub _inboxes { $_[0]->_data->{inboxes} //= {} }
 
 sub _job {
-  my ($self, $id) = (shift, shift);
+  my ($self, $id) = @_;
   return undef unless my $job = $self->_jobs->{$id};
   return(grep(($job->{state} eq $_), @_) ? $job : undef);
 }
 
 sub _job_id {
-  my $self = shift;
   my $id;
-  do { $id = md5_hex(time . rand 999) } while $self->_jobs->{$id};
-  ++$self->_data->{job_count};
+  do { $id = md5_hex(time . rand 999) } while $_[0]->_jobs->{$id};
+  ++$_[0]->_data->{job_count};
   return $id;
 }
 
-sub _job_count { shift->_data->{job_count} //= 0 }
+sub _job_count { $_[0]->_data->{job_count} //= 0 }
 
-sub _jobs { shift->_data->{jobs} //= {} }
+sub _jobs { $_[0]->_data->{jobs} //= {} }
 
-sub _load { Storable::retrieve($_[1]) }
+sub _load {
+  my ($self, $path) = @_;
+  my $decoder = $self->{backend}{_guard_decoder} //= Sereal::Decoder->new;
 
-sub _save { Storable::store($_[1] => $_[2]) }
+  # Borrowed from Mojo::File v7.33
+  CORE::open my $file, '<', $path or die qq{Failed to open file ($path): $!};
+  my ($payload, $ret) = ('', undef);
+  while ($ret = sysread $file, my $buffer, 131072, 0) { $payload .= $buffer }
+  die qq{Failed to read file ($path): $!} unless defined $ret;
 
-sub _workers { shift->_data->{workers} //= {} }
+  return sereal_decode_with_object $decoder, $payload;
+}
+
+sub _save {
+  my ($self, $content, $path) = @_;
+  my $encoder = $self->{backend}{_guard_encoder} //= Sereal::Encoder->new;
+  my $payload = sereal_encode_with_object $encoder, $content;
+
+  # Borrowed from Mojo::File v7.33
+  CORE::open my $file, '>', $path or die qq{Failed to open file ($path): $!};
+  (syswrite($file, $payload) // -1) == length $payload
+    or die qq{Failed to write file ($path): $!};
+  return;
+}
+
+sub _workers { $_[0]->_data->{workers} //= {} }
 
 sub _write { ++$_[0]{write} && return $_[0] }
 
 1;
 __END__
 
-=encoding utf8
-
 =head1 NAME
 
-Minion::Backend::Storable - File backend for Minion job queues.
+Minion::Backend::Sereal - File backend for Minion job queues.
 
 =head1 SYNOPSIS
 
-  use Minion::Backend::Storable;
+  use Minion::Backend::Sereal;
 
-  my $backend = Minion::Backend::Storable->new('/some/path/minion.data');
+  my $backend = Minion::Backend::Sereal->new('/some/path/minion.data');
 
 =head1 DESCRIPTION
 
-L<Minion::Backend::Storable> is a highly portable file-based backend for
-L<Minion>.
+L<Minion::Backend::Sereal> is a highly portable file-based backend for
+L<Minion>.  It is 2--3x as fast as the L<Storable|Minion::Backend::Storable>
+backend.
 
 This version supports Minion v6.06.
 
 =head1 ATTRIBUTES
 
-L<Minion::Backend::Storable> inherits all attributes from L<Minion::Backend> and
+L<Minion::Backend::Sereal> inherits all attributes from L<Minion::Backend> and
 implements the following new one.
 
 =head2 file
@@ -375,7 +395,7 @@ File all data is stored in.
 
 =head1 METHODS
 
-L<Minion::Backend::Storable> inherits all methods from L<Minion::Backend> and
+L<Minion::Backend::Sereal> inherits all methods from L<Minion::Backend> and
 implements the following new ones.
 
 =head2 broadcast
@@ -654,9 +674,9 @@ Returns the same information as L</"worker_info"> but in batches.
 
 =head2 new
 
-  my $backend = Minion::Backend::Storable->new('/some/path/minion.data');
+  my $backend = Minion::Backend::Sereal->new('/some/path/minion.data');
 
-Construct a new L<Minion::Backend::Storable> object.
+Construct a new L<Minion::Backend::Sereal> object.
 
 =head2 receive
 
@@ -857,7 +877,7 @@ Hash reference with whatever status information the worker would like to share.
 
 =head1 COPYRIGHT AND LICENCE
 
-Copyright (c) 2014 L<Sebastian Riedel|https://github.com/kraih>.
+Copyright (c) 2014 Sebastian Riedel.
 
 Copyright (c) 2015--2017 Sebastian Riedel & Nic Sandfield.
 
@@ -876,4 +896,4 @@ the terms of the Artistic License version 2.0.
 
 =head1 SEE ALSO
 
-L<Minion>, L<Minion::Backend::Sereal>, L<Minion::Backend::SQLite>.
+L<Minion>, L<Minion::Backend::Storable>, L<Minion::Backend::SQLite>.

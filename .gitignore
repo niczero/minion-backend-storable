@@ -5,6 +5,7 @@
 !.perltidyrc
 !.travis.yml
 /blib
+/dep
 /pm_to_blib
 /Makefile
 /Makefile.old

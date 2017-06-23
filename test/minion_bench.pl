@@ -13,7 +13,7 @@ my $INFO        = 100;
 
 # A benchmark script for comparing backends and evaluating the performance
 # impact of proposed changes
-my $minion = Minion->new(Storable => '/tmp/minion.data');
+my $minion = Minion->new(Sereal => '/tmp/minion.data');
 $minion->add_task(foo => sub { });
 $minion->add_task(bar => sub { });
 $minion->reset;
