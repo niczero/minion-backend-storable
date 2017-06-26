@@ -1,3 +1,10 @@
+# Borrowed from https://github.com/kraih/minion/blob/master/examples/minion_bench.pl
+# Copyright 2017 Sebastian Riedel
+#
+# Warning: This benchmark entails a _lot_ of writes to your disk in quick
+# succession.  This could be detrimental to the life expectancy of your
+# equipment, in particular old SSDs.
+#
 use Mojo::Base -strict;
 
 use Minion;

@@ -1,7 +1,7 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 7.011;
+our $VERSION = 7.012;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);

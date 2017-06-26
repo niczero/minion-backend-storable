@@ -1,4 +1,4 @@
-7.011 2017-06-26
+7.012 2017-06-26
   - Upgrade v7.00->v7.01.
     - Add job notes.
     - Modify locking with zero duration.
