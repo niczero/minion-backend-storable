@@ -1,3 +1,8 @@
+7.011 2017-06-26
+  - Upgrade v7.00->v7.01.
+    - Add job notes.
+    - Modify locking with zero duration.
+
 7.001 2017-06-24
   - Upgrade v6.05->v7.00.
     - Add lock & unlock.

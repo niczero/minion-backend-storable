@@ -1,7 +1,7 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 7.001;
+our $VERSION = 7.011;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
@@ -49,6 +49,7 @@ sub enqueue {
     created  => time,
     delayed  => time + ($options->{delay} // 0),
     id       => $guard->_job_id,
+    notes    => $options->{notes} // {},
     parents  => $options->{parents} // [],
     priority => $options->{priority} // 0,
     queue    => $options->{queue} // 'default',
@@ -68,8 +69,7 @@ sub finish_job { shift->_update(0, @_) }
 sub job_info {
   my ($self, $id) = @_;
   my $guard = $self->_guard;
-  my $jobs = $guard->_jobs;
-  my $job = $jobs->{$id} or return undef;
+  return undef unless my $job = $guard->_jobs->{$id};
   $job->{children} = $guard->_children($id);
   return $job;
 }
@@ -108,6 +108,7 @@ sub lock {
 
   # Check capacity
   return undef unless @$locks < $limit;
+  return 1 unless $duration > 0;
 
   # Add lock, maintaining order
   my $this_expires = $now + $duration;
@@ -116,6 +117,14 @@ sub lock {
     if ($locks->[$#$locks] // 0) < $this_expires;
 
   @$locks = sort { ($a // 0) <=> ($b // 0) } (@$locks, $this_expires);
+  return 1;
+}
+
+sub note {
+  my ($self, $id, $key, $value) = @_;
+  my $guard = $self->_guard;
+  return undef unless my $job = $guard->_write->_jobs->{$id};
+  $job->{notes}{$key} = $value;
   return 1;
 }
 
@@ -396,7 +405,7 @@ Minion::Backend::Storable - File backend for Minion job queues.
 L<Minion::Backend::Storable> is a highly portable file-based backend for
 L<Minion>.
 
-This version supports Minion v7.00.
+This version supports Minion v7.01.
 
 =head1 ATTRIBUTES
 
@@ -498,6 +507,12 @@ L<Minion/"backoff"> after the first attempt, defaults to C<1>.
 
 Delay job for this many seconds (from now), defaults to C<0>.
 
+=item notes
+
+  notes => {foo => 'bar', baz => [1, 2, 3]}
+
+Hash reference with arbitrary metadata for this job.
+
 =item parents
 
   parents => [$id1, $id2, $id3]
@@ -589,6 +604,12 @@ Epoch time job was delayed to.
   finished => 784111777
 
 Epoch time job was finished.
+
+=item notes
+
+  notes => {foo => 'bar', baz => [1, 2, 3]}
+
+Hash reference with arbitrary metadata for this job.
 
 =item parents
 
@@ -715,6 +736,12 @@ defaults to C<1>.
   my $backend = Minion::Backend::Storable->new('/some/path/minion.data');
 
 Construct a new L<Minion::Backend::Storable> object.
+
+=head2 note
+
+  my $bool = $backend->note($job_id, foo => 'bar');
+
+Change a metadata field for a job.
 
 =head2 receive
 

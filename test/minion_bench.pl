@@ -36,7 +36,7 @@ sub dequeue {
   for (1 .. $WORKERS) {
     die "Couldn't fork: $!" unless defined(my $pid = fork);
     unless ($pid) {
-      my $worker = $minion->worker->register;
+      my $worker = $minion->repair->worker->register;
       say "$$ will finish $DEQUEUE jobs";
       my $before = time;
       $worker->dequeue(0.5)->finish for 1 .. $DEQUEUE;
