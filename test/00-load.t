@@ -11,7 +11,7 @@ diag "Testing Minion::Backend::Sereal $Minion::Backend::Sereal::VERSION";
 
 diag "  with Minion $Minion::VERSION, Perl $], $^X";
 
-like(Minion->VERSION, qr/^7\./, 'compatible version of Minion')
-  or diag ' ** Compatible with Minion v7 only ** ';
+like(Minion->VERSION, qr/^8\./, 'compatible version of Minion')
+  or diag ' ** Compatible with Minion v8 only ** ';
 
 done_testing();

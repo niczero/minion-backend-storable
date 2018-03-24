@@ -66,33 +66,60 @@ sub fail_job { shift->_update(1, @_) }
 
 sub finish_job { shift->_update(0, @_) }
 
-sub job_info {
-  my ($self, $id) = @_;
-  my $guard = $self->_guard;
-  return undef unless my $job = $guard->_jobs->{$id};
-  $job->{children} = $guard->_children($id);
-  return $job;
-}
-
 sub list_jobs {
   my ($self, $offset, $limit, $options) = @_;
-
   my $guard = $self->_guard;
+  my $jobs = $guard->_jobs;
+
+  my @ids = (not defined $options->{ids}) ? keys %$jobs
+      : (grep { defined && exists($jobs->{$_}) } @{$options->{ids}});
+
   my @jobs = sort { $b->{created} <=> $a->{created} }
   grep +( (not defined $options->{queue} or $_->{queue} eq $options->{queue})
       and (not defined $options->{state} or $_->{state} eq $options->{state})
       and (not defined $options->{task}  or $_->{task} eq $options->{task})
-  ), values %{$guard->_jobs};
+  ), map { $jobs->{$_} } @ids;
 
-  return [map +($_->{children} = $guard->_children($_->{id}) and $_), grep defined, @jobs[$offset .. ($offset + $limit - 1)]];
+  my $total = @jobs;
+  $jobs = [map +($_->{children} = $guard->_children($_->{id}) and $_), grep defined, @jobs[$offset .. ($offset + $limit - 1)]];
+  return { jobs => $jobs, total => $total };
+}
+
+sub list_locks {
+  my ($self, $offset, $limit, $options) = @_;
+  my $guard = $self->_guard;
+  my $locks = $guard->_locks;
+  my $now = time;
+
+  my @locks = ();
+  for my $name (keys %$locks) {
+    push(@locks, grep +($_->{expires} > $now
+          and (not defined $options->{name} or $_->{name} eq $options->{name})),
+      map { { name => $name, expires => $_ // 0 } } @{$locks->{$name}});
+  }
+  # NOTE: Minion::Backend::Pg sorts by table id, we by name
+  @locks = sort { $a->{name} cmp $b->{name} } @locks;
+
+  my $total = @locks;
+  $locks = [grep {defined} @locks[$offset .. ($offset + $limit - 1)]];
+  return { locks => $locks, total => $total };
 }
 
 sub list_workers {
-  my ($self, $offset, $limit) = @_;
+  my ($self, $offset, $limit, $options) = @_;
   my $guard = $self->_guard;
+  my $workers = $guard->_workers;
+
+  my @ids = (not defined $options->{ids}) ? keys %$workers
+      : (grep { defined && exists($workers->{$_}) } @{$options->{ids}});
+
   my @workers = map { $self->_worker_info($guard, $_->{id}) }
-    sort { $b->{started} <=> $a->{started} } values %{$guard->_workers};
-  return [grep {defined} @workers[$offset .. ($offset + $limit - 1)]];
+    sort { $b->{started} <=> $a->{started} }
+    map { $workers->{$_} } @ids;
+
+  my $total = @workers;
+  $workers = [grep {defined} @workers[$offset .. ($offset + $limit - 1)]];
+  return { workers => $workers, total => $total };
 }
 
 sub lock {
@@ -198,7 +225,7 @@ sub retry_job {
   $guard->_write;
   ++$job->{retries};
   $job->{delayed} = time + $options->{delay} if $options->{delay};
-  exists $options->{$_} and $job->{$_} = $options->{$_} for qw(priority queue);
+  exists $options->{$_} and $job->{$_} = $options->{$_} for qw(attempts parents priority queue);
   @$job{qw(retried state)} = (time, 'inactive');
   delete @$job{qw(finished started worker)};
 
@@ -217,6 +244,11 @@ sub stats {
     ++$delayed if $job->{state} eq 'inactive'
         and (time < $job->{delayed} or @{$job->{parents}});
   }
+  my $now = time;
+  for my $lock (values %{$guard->_locks}) {
+    defined and $_ > $now and ++$states{locks}
+      for (@$lock);
+  }
 
   return {
     active_workers   => $active,
@@ -226,7 +258,9 @@ sub stats {
     enqueued_jobs    => $guard->_job_count,
     failed_jobs      => $states{failed}   // 0,
     finished_jobs    => $states{finished} // 0,
-    inactive_jobs    => $states{inactive} // 0
+    inactive_jobs    => $states{inactive} // 0,
+    active_locks     => $states{locks} // 0,
+    uptime           => 0 # uptime is always 0
   };
 }
 
@@ -253,8 +287,6 @@ sub unregister_worker {
   delete $guard->_workers->{$id};
 }
 
-sub worker_info { $_[0]->_worker_info($_[0]->_guard, $_[1]) }
-
 sub _guard { Minion::Backend::Sereal::_Guard->new(backend => shift) }
 
 sub _try {
@@ -268,7 +300,8 @@ sub _try {
   my @ready = sort { $b->{priority} <=> $a->{priority}
         || $a->{created} <=> $b->{created} }
     grep +($_->{state} eq 'inactive' and $queues{$_->{queue}}
-        and $tasks->{$_->{task}} and $_->{delayed} <= $now),
+        and $tasks->{$_->{task}} and $_->{delayed} <= $now
+        and (not defined $options->{id} or $_->{id} eq $options->{id})),
     values %$jobs;
 
   my $job;
@@ -367,9 +400,10 @@ sub _job {
 sub _job_count { $_[0]->_data->{job_count} //= 0 }
 
 sub _job_id {
+  my ($self) = @_;
   my $id;
-  do { $id = md5_hex(time . rand 999) } while $_[0]->_jobs->{$id};
-  ++$_[0]->_data->{job_count};
+  do { $id = md5_hex(time . rand 999) } while $self->_jobs->{$id};
+  ++$self->_data->{job_count};
   return $id;
 }
 
@@ -464,6 +498,12 @@ These options are currently available:
 
 =over 2
 
+=item id
+
+  id => '10023'
+
+Dequeue a specific job.
+
 =item queues
 
   queues => ['important']
@@ -486,7 +526,7 @@ Job arguments.
 
   id => '10023'
 
-Job id.
+Job ID.
 
 =item retries
 
@@ -544,8 +584,7 @@ transitioned to the state C<finished> before it can be processed.
 
   priority => 5
 
-Job priority, defaults to C<0>.  Jobs with a higher priority get performed
-first.
+Job priority, defaults to C<0>. Jobs with a higher priority get performed first.
 
 =item queue
 
@@ -559,7 +598,8 @@ Queue to put job in, defaults to C<default>.
 
   my $bool = $backend->fail_job($job_id, $retries);
   my $bool = $backend->fail_job($job_id, $retries, 'Something went wrong!');
-  my $bool = $backend->fail_job($job_id, $retries, {msg => 'Wrong, wrong!'});
+  my $bool = $backend->fail_job(
+    $job_id, $retries, {whatever => 'Something went wrong!'});
 
 Transition from C<active> to C<failed> state, and if there are attempts
 remaining, transition back to C<inactive> with a delay based on
@@ -569,21 +609,55 @@ L<Minion/"backoff">.
 
   my $bool = $backend->finish_job($job_id, $retries);
   my $bool = $backend->finish_job($job_id, $retries, 'All went well!');
-  my $bool = $backend->finish_job($job_id, $retries, {msg => 'All went well!'});
+  my $bool = $backend->finish_job(
+    $job_id, $retries, {whatever => 'All went well!'});
 
 Transition from C<active> to C<finished> state.
 
-=head2 job_info
+=head2 list_jobs
 
-  my $job_info = $backend->job_info($job_id);
+  my $results = $backend->list_jobs($offset, $limit);
+  my $results = $backend->list_jobs($offset, $limit, {state => 'inactive'});
 
-Get information about a job, or return C<undef> if job does not exist.
+Returns the information about jobs in batches.
 
   # Check job state
-  my $state = $backend->job_info($job_id)->{state};
+  my $results = $backend->list_jobs(0, 1, {ids => [$job_id]});
+  my $state = $results->{jobs}[0]{state};
 
   # Get job result
-  my $result = $backend->job_info($job_id)->{result};
+  my $results = $backend->list_jobs(0, 1, {ids => [$job_id]});
+  my $result  = $results->{jobs}[0]{result};
+
+These options are currently available:
+
+=over 2
+
+=item ids
+
+  ids => ['23', '24']
+
+List only jobs with these ids.
+
+=item queue
+
+  queue => 'important'
+
+List only jobs in this queue.
+
+=item state
+
+  state => 'inactive'
+
+List only jobs in this state.
+
+=item task
+
+  task => 'test'
+
+List only jobs for this task.
+
+=back
 
 These fields are currently available:
 
@@ -677,7 +751,7 @@ Epoch time job was started.
 
   state => 'inactive'
 
-Current job state, usually C<inactive>, C<active>, C<failed>, or C<finished>.
+Current job state, usually C<active>, C<failed>, C<finished> or C<inactive>.
 
 =item task
 
@@ -693,42 +767,111 @@ Id of worker that is processing the job.
 
 =back
 
-=head2 list_jobs
+=head2 list_locks
 
-  my $batch = $backend->list_jobs($offset, $limit);
-  my $batch = $backend->list_jobs($offset, $limit, {state => 'inactive'});
+  my $results = $backend->list_locks($offset, $limit);
+  my $results = $backend->list_locks($offset, $limit, {name => 'foo'});
 
-Returns the same information as L</"job_info"> but in batches.
+Returns information about locks in batches.
+
+  # Check expiration time
+  my $results = $backend->list_locks(0, 1, {name => 'foo'});
+  my $expires = $results->{locks}[0]{expires};
 
 These options are currently available:
 
 =over 2
 
-=item queue
+=item name
 
-  queue => 'important'
+  name => 'foo'
 
-List only jobs in this queue.
+List only locks with this name.
 
-=item state
+=back
 
-  state => 'inactive'
+These fields are currently available:
 
-List only jobs in this state.
+=over 2
 
-=item task
+=item expires
 
-  task => 'test'
+  expires => 784111777
 
-List only jobs for this task.
+Epoch time this lock will expire.
+
+=item name
+
+  name => 'foo'
+
+Lock name.
 
 =back
 
 =head2 list_workers
 
-  my $batch = $backend->list_workers($offset, $limit);
+  my $results = $backend->list_workers($offset, $limit);
+  my $results = $backend->list_workers($offset, $limit, {ids => [23]});
 
-Returns the same information as L</"worker_info"> but in batches.
+Returns information about workers in batches.
+
+  # Check worker host
+  my $results = $backend->list_workers(0, 1, {ids => [$worker_id]});
+  my $host    = $results->{workers}[0]{host};
+
+These options are currently available:
+
+=over 2
+
+=item ids
+
+  ids => ['23', '24']
+
+List only workers with these ids.
+
+=back
+
+These fields are currently available:
+
+=over 2
+
+=item host
+
+  host => 'localhost'
+
+Worker host.
+
+=item jobs
+
+  jobs => ['10023', '10024', '10025', '10029']
+
+Ids of jobs the worker is currently processing.
+
+=item notified
+
+  notified => 784111777
+
+Epoch time worker sent the last heartbeat.
+
+=item pid
+
+  pid => 12345
+
+Process id of worker.
+
+=item started
+
+  started => 784111777
+
+Epoch time worker was started.
+
+=item status
+
+  status => {queues => ['default', 'important']}
+
+Hash reference with whatever status information the worker would like to share.
+
+=back
 
 =head2 lock
 
@@ -736,7 +879,8 @@ Returns the same information as L</"worker_info"> but in batches.
   my $bool = $backend->lock('foo', 3600, {limit => 20});
 
 Try to acquire a named lock that will expire automatically after the given
-amount of time in seconds.
+amount of time in seconds. An expiration time of C<0> can be used to check if a
+named lock already exists without creating one.
 
 These options are currently available:
 
@@ -774,7 +918,7 @@ Receive remote control commands for worker.
   my $worker_id = $backend->register_worker;
   my $worker_id = $backend->register_worker($worker_id);
   my $worker_id = $backend->register_worker(
-      $worker_id, {status => {queues => ['default', 'important']}});
+    $worker_id, {status => {queues => ['default', 'important']}});
 
 Register worker or send heartbeat to show that this worker is still alive.
 
@@ -820,11 +964,23 @@ These options are currently available:
 
 =over 2
 
+=item attempts
+
+  attempts => 25
+
+Number of times performing this job will be attempted.
+
 =item delay
 
   delay => 10
 
 Delay job for this many seconds (from now), defaults to C<0>.
+
+=item parents
+
+  parents => [$id1, $id2, $id3]
+
+Jobs this job depends on.
 
 =item priority
 
@@ -844,7 +1000,7 @@ Queue to put job in.
 
   my $stats = $backend->stats;
 
-Get statistics for jobs and workers.
+Get statistics for the job queue.
 
 These fields are currently available:
 
@@ -855,6 +1011,12 @@ These fields are currently available:
   active_jobs => 100
 
 Number of jobs in C<active> state.
+
+=item active_locks
+
+  active_locks => 100
+
+Number of active named locks.
 
 =item active_workers
 
@@ -867,15 +1029,15 @@ Number of workers that are currently processing a job.
   delayed_jobs => 100
 
 Number of jobs in C<inactive> state that are scheduled to run at specific time
-in the future or have unresolved dependencies.  Note that this field is
-EXPERIMENTAL and might change without warning!
+in the future. Note that this field is EXPERIMENTAL and might change without
+warning!
 
 =item enqueued_jobs
 
   enqueued_jobs => 100000
 
-Rough estimate of how many jobs have ever been enqueued.  Note that this field
-is EXPERIMENTAL and might change without warning!
+Rough estimate of how many jobs have ever been enqueued. Note that this field is
+EXPERIMENTAL and might change without warning!
 
 =item failed_jobs
 
@@ -901,6 +1063,12 @@ Number of jobs in C<inactive> state.
 
 Number of workers that are currently not processing a job.
 
+=item uptime
+
+  uptime => 1000
+
+Uptime in seconds. Always 0.
+
 =back
 
 =head2 unlock
@@ -914,57 +1082,6 @@ Release a named lock.
   $backend->unregister_worker($worker_id);
 
 Unregister worker.
-
-=head2 worker_info
-
-  my $worker_info = $backend->worker_info($worker_id);
-
-Get information about a worker, or return C<undef> if worker does not exist.
-
-  # Check worker host
-  my $host = $backend->worker_info($worker_id)->{host};
-
-These fields are currently available:
-
-=over 2
-
-=item host
-
-  host => 'localhost'
-
-Worker host.
-
-=item jobs
-
-  jobs => ['10023', '10024', '10025', '10029']
-
-Ids of jobs the worker is currently processing.
-
-=item notified
-
-  notified => 784111777
-
-Epoch time worker sent the last heartbeat.
-
-=item pid
-
-  pid => 12345
-
-Process id of worker.
-
-=item started
-
-  started => 784111777
-
-Epoch time worker was started.
-
-=item status
-
-  status => {queues => ['default', 'important']}
-
-Hash reference with whatever status information the worker would like to share.
-
-=back
 
 =head1 COPYRIGHT AND LICENCE
 
