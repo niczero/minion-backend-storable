@@ -5,6 +5,7 @@ our $VERSION = 7.012;
 
 use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
+use List::Util 'any';
 
 # Attributes
 
@@ -66,6 +67,26 @@ sub fail_job { shift->_update(1, @_) }
 
 sub finish_job { shift->_update(0, @_) }
 
+sub history {
+  my $self = shift;
+  my $guard = $self->_guard;
+  my $jobs = $guard->_jobs;
+
+  my @daily = ();
+  my $now = time;
+  push(@daily, { epoch => $now - 60 * 60 * $_, failed_jobs => 0, finished_jobs => 0 })
+    for (reverse(1..24));
+  my $min = $daily[0]->{epoch} + 1;
+  for my $job (values %$jobs) {
+    next if ($job->{finished} < $min);
+    my $ix = int(($job->{finished} - $min) / 60 / 60);
+    my $elem = $daily[$ix];
+    ++$elem->{finished_jobs} if ($job->{state} eq 'finished');
+    ++$elem->{failed_jobs}   if ($job->{state} eq 'failed');
+  }
+  return { daily => \@daily };
+}
+
 sub list_jobs {
   my ($self, $offset, $limit, $options) = @_;
   my $guard = $self->_guard;
@@ -75,10 +96,12 @@ sub list_jobs {
       : (grep { defined && exists($jobs->{$_}) } @{$options->{ids}});
 
   my @jobs = sort { $b->{created} <=> $a->{created} }
-  grep +( (not defined $options->{queue} or $_->{queue} eq $options->{queue})
-      and (not defined $options->{state} or $_->{state} eq $options->{state})
-      and (not defined $options->{task}  or $_->{task} eq $options->{task})
-  ), map { $jobs->{$_} } @ids;
+  grep {
+      my $job = $_;
+      (not defined $options->{queues} or (any { $job->{queue} eq $_ } @{$options->{queues}}))
+      and (not defined $options->{states} or (any { $job->{state} eq $_ } @{$options->{states}}))
+      and (not defined $options->{tasks}  or (any { $job->{task}  eq $_ } @{$options->{tasks}}))
+  } map { $jobs->{$_} } @ids;
 
   my $total = @jobs;
   $jobs = [map +($_->{children} = $guard->_children($_->{id}) and $_), grep defined, @jobs[$offset .. ($offset + $limit - 1)]];
@@ -93,9 +116,11 @@ sub list_locks {
 
   my @locks = ();
   for my $name (keys %$locks) {
-    push(@locks, grep +($_->{expires} > $now
-          and (not defined $options->{name} or $_->{name} eq $options->{name})),
-      map { { name => $name, expires => $_ // 0 } } @{$locks->{$name}});
+    push(@locks, grep {
+          my $lock = $_;
+          $lock->{expires} > $now
+          and (not defined $options->{names} or (any { $lock->{name} eq $_ } @{$options->{names}}))
+      } map { { name => $name, expires => $_ // 0 } } @{$locks->{$name}});
   }
   # NOTE: Minion::Backend::Pg sorts by table id, we by name
   @locks = sort { $a->{name} cmp $b->{name} } @locks;
@@ -148,10 +173,10 @@ sub lock {
 }
 
 sub note {
-  my ($self, $id, $key, $value) = @_;
+  my ($self, $id, $merge) = @_;
   my $guard = $self->_guard;
   return undef unless my $job = $guard->_write->_jobs->{$id};
-  $job->{notes}{$key} = $value;
+  $job->{notes} = { %{$job->{notes}}, %$merge };
   return 1;
 }
 
@@ -601,9 +626,9 @@ Queue to put job in, defaults to C<default>.
   my $bool = $backend->fail_job(
     $job_id, $retries, {whatever => 'Something went wrong!'});
 
-Transition from C<active> to C<failed> state, and if there are attempts
-remaining, transition back to C<inactive> with a delay based on
-L<Minion/"backoff">.
+Transition from C<active> to C<failed> state with or without a result, and if
+there are attempts remaining, transition back to C<inactive> with a delay based
+on L<Minion/"backoff">.
 
 =head2 finish_job
 
@@ -612,14 +637,36 @@ L<Minion/"backoff">.
   my $bool = $backend->finish_job(
     $job_id, $retries, {whatever => 'All went well!'});
 
-Transition from C<active> to C<finished> state.
+Transition from C<active> to C<finished> state with or without a result.
+
+=head2 history
+
+  my $history = $backend->history;
+
+Get history information for job queue. Note that this method is EXPERIMENTAL and
+might change without warning!
+
+These fields are currently available:
+
+=over 2
+
+=item daily
+
+  daily => [{epoch => 12345, finished_jobs => 95, failed_jobs => 2}, ...]
+
+Hourly counts for processed jobs from the past day.
+
+=back
 
 =head2 list_jobs
 
   my $results = $backend->list_jobs($offset, $limit);
-  my $results = $backend->list_jobs($offset, $limit, {state => 'inactive'});
+  my $results = $backend->list_jobs($offset, $limit, {states => ['inactive']});
 
 Returns the information about jobs in batches.
+
+  # Get the total number of results (without limit)
+  my $num = $backend->list_jobs(0, 100, {queues => ['important']})->{total};
 
   # Check job state
   my $results = $backend->list_jobs(0, 1, {ids => [$job_id]});
@@ -639,23 +686,23 @@ These options are currently available:
 
 List only jobs with these ids.
 
-=item queue
+=item queues
 
-  queue => 'important'
+  queues => ['important', 'unimportant']
 
-List only jobs in this queue.
+List only jobs in these queues.
 
-=item state
+=item states
 
-  state => 'inactive'
+  states => ['inactive', 'active']
 
-List only jobs in this state.
+List only jobs in these states.
 
-=item task
+=item tasks
 
-  task => 'test'
+  tasks => ['foo', 'bar']
 
-List only jobs for this task.
+List only jobs for these tasks.
 
 =back
 
@@ -698,6 +745,12 @@ Epoch time job was delayed to.
   finished => 784111777
 
 Epoch time job was finished.
+
+=item id
+
+  id => 10025
+
+Job id.
 
 =item notes
 
@@ -770,23 +823,26 @@ Id of worker that is processing the job.
 =head2 list_locks
 
   my $results = $backend->list_locks($offset, $limit);
-  my $results = $backend->list_locks($offset, $limit, {name => 'foo'});
+  my $results = $backend->list_locks($offset, $limit, {names => ['foo']});
 
 Returns information about locks in batches.
 
+  # Get the total number of results (without limit)
+  my $num = $backend->list_locks(0, 100, {names => ['bar']})->{total};
+
   # Check expiration time
-  my $results = $backend->list_locks(0, 1, {name => 'foo'});
+  my $results = $backend->list_locks(0, 1, {names => ['foo']});
   my $expires = $results->{locks}[0]{expires};
 
 These options are currently available:
 
 =over 2
 
-=item name
+=item names
 
-  name => 'foo'
+  names => ['foo', 'bar']
 
-List only locks with this name.
+List only locks with these names.
 
 =back
 
@@ -815,6 +871,9 @@ Lock name.
 
 Returns information about workers in batches.
 
+  # Get the total number of results (without limit)
+  my $num = $backend->list_workers(0, 100)->{total};
+
   # Check worker host
   my $results = $backend->list_workers(0, 1, {ids => [$worker_id]});
   my $host    = $results->{workers}[0]{host};
@@ -834,6 +893,12 @@ List only workers with these ids.
 These fields are currently available:
 
 =over 2
+
+=item id
+
+  id => 22
+
+Worker id.
 
 =item host
 
@@ -903,9 +968,9 @@ Construct a new L<Minion::Backend::Sereal> object.
 
 =head2 note
 
-  my $bool = $backend->note($job_id, foo => 'bar');
+  my $bool = $backend->note($job_id, {mojo => 'rocks', minion => 'too'});
 
-Change a metadata field for a job.
+Change one or more metadata fields for a job.
 
 =head2 receive
 
