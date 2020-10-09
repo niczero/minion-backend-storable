@@ -1,11 +1,11 @@
 package Minion::Backend::Storable;
 use Minion::Backend -base;
 
-our $VERSION = 7.012;
+our $VERSION = 10.13;
 
 use Sys::Hostname 'hostname';
-use Time::HiRes qw(time usleep);
-use List::Util 'any';
+use Time::HiRes ();
+use List::Util qw(any none);
 
 # Attributes
 
@@ -34,7 +34,7 @@ sub broadcast {
 sub dequeue {
   my ($self, $id, $wait, $options) = @_;
   return ($self->_try($id, $options) or do {
-    usleep $wait * 1_000_000;
+    Time::HiRes::usleep $wait * 1_000_000;
     $self->_try($id, $options);
   });
 }
@@ -43,12 +43,15 @@ sub enqueue {
   my ($self, $task, $args, $options) = (shift, shift, shift // [], shift // {});
 
   my $guard = $self->_guard->_write;
+  my $now = Time::HiRes::time;
 
   my $job = {
     args     => $args,
     attempts => $options->{attempts} // 1,
-    created  => time,
-    delayed  => time + ($options->{delay} // 0),
+    created  => $now,
+    delayed  => $now + ($options->{delay} // 0),
+    expires  => defined($options->{expire}) ? $now + $options->{expire} : undef,
+    lax      => $options->{lax} ? 1 : 0,
     id       => $guard->_job_id,
     notes    => $options->{notes} // {},
     parents  => $options->{parents} // [],
@@ -73,7 +76,7 @@ sub history {
   my $jobs = $guard->_jobs;
 
   my @daily = ();
-  my $now = time;
+  my $now = Time::HiRes::time;
   push(@daily, { epoch => $now - 60 * 60 * $_, failed_jobs => 0, finished_jobs => 0 })
     for (reverse(1..24));
   my $min = $daily[0]->{epoch} + 1;
@@ -89,30 +92,40 @@ sub history {
 
 sub list_jobs {
   my ($self, $offset, $limit, $options) = @_;
+  my $now   = Time::HiRes::time;
   my $guard = $self->_guard;
   my $jobs = $guard->_jobs;
 
   my @ids = (not defined $options->{ids}) ? keys %$jobs
       : (grep { defined && exists($jobs->{$_}) } @{$options->{ids}});
+  @ids = sort { $b <=> $a } @ids;
+  @ids = grep { $_ < $options->{before} } @ids
+    if (defined $options->{before});
 
-  my @jobs = sort { $b->{created} <=> $a->{created} }
-  grep {
+  my @jobs = grep {
       my $job = $_;
-      (not defined $options->{queues} or (any { $job->{queue} eq $_ } @{$options->{queues}}))
+      ($job->{state} ne 'inactive' or not defined $job->{expires} or $job->{expires} > $now)
+      and (not defined $options->{queues} or (any { $job->{queue} eq $_ } @{$options->{queues}}))
       and (not defined $options->{states} or (any { $job->{state} eq $_ } @{$options->{states}}))
       and (not defined $options->{tasks}  or (any { $job->{task}  eq $_ } @{$options->{tasks}}))
+      and (not defined $options->{notes}  or (any { exists($job->{notes}->{$_}) } @{$options->{notes}}))
   } map { $jobs->{$_} } @ids;
 
   my $total = @jobs;
-  $jobs = [map +($_->{children} = $guard->_children($_->{id}) and $_), grep defined, @jobs[$offset .. ($offset + $limit - 1)]];
+  $jobs = [ map {
+          $_->{children} = $guard->_children($_->{id});
+          $_->{time} = Time::HiRes::time;
+          $_;
+      } grep defined, @jobs[$offset .. ($offset + $limit - 1)]
+  ];
   return { jobs => $jobs, total => $total };
 }
 
 sub list_locks {
   my ($self, $offset, $limit, $options) = @_;
+  my $now   = Time::HiRes::time;
   my $guard = $self->_guard;
   my $locks = $guard->_locks;
-  my $now = time;
 
   my @locks = ();
   for my $name (keys %$locks) {
@@ -137,9 +150,11 @@ sub list_workers {
 
   my @ids = (not defined $options->{ids}) ? keys %$workers
       : (grep { defined && exists($workers->{$_}) } @{$options->{ids}});
+  @ids = sort { $b <=> $a } @ids;
+  @ids = grep { $_ < $options->{before} } @ids
+    if (defined $options->{before});
 
   my @workers = map { $self->_worker_info($guard, $_->{id}) }
-    sort { $b->{started} <=> $a->{started} }
     map { $workers->{$_} } @ids;
 
   my $total = @workers;
@@ -155,7 +170,7 @@ sub lock {
   my $locks = $guard->_locks->{$name} //= [];
 
   # Delete expired locks
-  my $now = time;
+  my $now = Time::HiRes::time;
   @$locks = grep +($now < ($_ // 0)), @$locks;
 
   # Check capacity
@@ -176,7 +191,9 @@ sub note {
   my ($self, $id, $merge) = @_;
   my $guard = $self->_guard;
   return undef unless my $job = $guard->_write->_jobs->{$id};
-  $job->{notes} = { %{$job->{notes}}, %$merge };
+  my %notes = ( %{$job->{notes}}, %$merge );
+  delete @notes{ grep { not defined $notes{$_} } keys %$merge };
+  $job->{notes} = \%notes;
   return 1;
 }
 
@@ -191,13 +208,14 @@ sub receive {
 
 sub register_worker {
   my ($self, $id, $options) = (shift, shift, shift // {});
+  my $now = Time::HiRes::time;
   my $guard = $self->_guard->_write;
   my $worker = $id ? $guard->_workers->{$id} : undef;
   unless ($worker) {
-    $worker = {host => hostname, id => $guard->_id, pid => $$, started => time};
+    $worker = {host => hostname, id => $guard->_id, pid => $$, started => $now};
     $guard->_workers->{$worker->{id}} = $worker;
   }
-  @$worker{qw(notified status)} = (time, $options->{status} // {});
+  @$worker{qw(notified status)} = ($now, $options->{status} // {});
   return $worker->{id};
 }
 
@@ -214,45 +232,55 @@ sub repair {
   my $minion = $self->minion;
 
   # Workers without heartbeat
+  my $now     = Time::HiRes::time;
   my $guard   = $self->_guard->_write;
   my $workers = $guard->_workers;
   my $jobs    = $guard->_jobs;
-  my $after   = time - $minion->missing_after;
+  my $after   = $now - $minion->missing_after;
   $_->{notified} < $after and delete $workers->{$_->{id}} for values %$workers;
 
-  # Old jobs without unfinished dependents
-  $after = time - $minion->remove_after;
+  # Old jobs with no unresolved dependencies and expired jobs
+  $after = $now - $minion->remove_after;
   for my $job (values %$jobs) {
-    next unless $job->{state} eq 'finished' and $job->{finished} <= $after;
-    delete $jobs->{$job->{id}} unless grep +($jobs->{$_}{state} ne 'finished'),
-        @{$guard->_children($job->{id})};
+    next unless ($job->{state} eq 'finished' and $job->{finished} <= $after
+            and none { $jobs->{$_}{state} ne 'finished' } @{$guard->_children($job->{id})})
+        or ($job->{state} eq 'inactive' and defined $job->{expires} and $job->{expires} <= $now);
+    delete $jobs->{$job->{id}};
+  }
+
+  # Jobs in queue without workers or not enough workers (cannot be retried and requires admin attention)
+  for my $job (values %$jobs) {
+    next unless $job->{state} eq 'inactive' and $job->{delayed} < $after;
+    $job->{state} = 'failed';
+    $job->{result} = 'Job appears stuck in queue';
   }
 
   # Jobs with missing worker (can be retried)
   my @abandoned = map [@$_{qw(id retries)}],
-      grep +($_->{state} eq 'active' and not exists $workers->{$_->{worker}}),
+      grep +($_->{state} eq 'active' and $_->{queue} ne 'minion_foreground'
+          and not exists $workers->{$_->{worker}}),
       values %$jobs;
   undef $guard;
   $self->fail_job(@$_, 'Worker went away') for @abandoned;
-
-  return;
 }
 
-sub reset { $_[0]->_guard->_save({} => $_[0]{file}) }
+sub reset { shift->_guard->_write->_reset(@_); }
 
 sub retry_job {
   my ($self, $id, $retries, $options) = (shift, shift, shift, shift // {});
 
   my $guard = $self->_guard;
   return undef
-    unless my $job = $guard->_job($id, qw(active failed finished inactive));
+    unless my $job = $guard->_jobs->{$id};
   return undef unless $job->{retries} == $retries;
+  my $now = Time::HiRes::time;
   $guard->_write;
-  ++$job->{retries};
-  $job->{delayed} = time + $options->{delay} if $options->{delay};
+  $job->{delayed} = $now + ($options->{delay} // 0);
   exists $options->{$_} and $job->{$_} = $options->{$_} for qw(attempts parents priority queue);
-  @$job{qw(retried state)} = (time, 'inactive');
-  delete @$job{qw(finished started worker)};
+  exists $options->{lax}    and $job->{lax}     = $options->{lax} ? 1 : 0;
+  exists $options->{expire} and $job->{expires} = $now + $options->{expire};
+  @$job{qw(retried state)} = ($now, 'inactive');
+  ++$job->{retries};
 
   return 1;
 }
@@ -260,16 +288,16 @@ sub retry_job {
 sub stats {
   my $self = shift;
 
-  my ($active, $delayed) = (0, 0);
+  my ($inactive, $active, $delayed) = (0, 0, 0);
   my (%seen, %states);
+  my $now   = Time::HiRes::time;
   my $guard = $self->_guard;
   for my $job (values %{$guard->_jobs}) {
     ++$states{$job->{state}};
-    ++$active if $job->{state} eq 'active' and not $seen{$job->{worker}}++;
-    ++$delayed if $job->{state} eq 'inactive'
-        and (time < $job->{delayed} or @{$job->{parents}});
+    ++$inactive if $job->{state} eq 'inactive' and (not defined $job->{expires} or $job->{expires} > $now);
+    ++$active   if $job->{state} eq 'active' and not $seen{$job->{worker}}++;
+    ++$delayed  if $job->{state} eq 'inactive' and ($job->{delayed} > $now);
   }
-  my $now = time;
   for my $lock (values %{$guard->_locks}) {
     defined and $_ > $now and ++$states{locks}
       for (@$lock);
@@ -283,7 +311,7 @@ sub stats {
     enqueued_jobs    => $guard->_job_count,
     failed_jobs      => $states{failed}   // 0,
     finished_jobs    => $states{finished} // 0,
-    inactive_jobs    => $states{inactive} // 0,
+    inactive_jobs    => $inactive,
     active_locks     => $states{locks} // 0,
     uptime           => 0 # uptime is always 0
   };
@@ -295,7 +323,7 @@ sub unlock {
   my $guard = $self->_guard->_write;
   my $locks = $guard->_locks->{$name} //= [];
   my $length = @$locks;
-  my $now = time;
+  my $now = Time::HiRes::time;
 
   my $i = 0;
   ++$i while $i < $length and ($locks->[$i] // 0) <= $now;
@@ -319,13 +347,14 @@ sub _try {
   my $tasks = $self->minion->tasks;
   my %queues = map +($_ => 1), @{$options->{queues} // ['default']};
 
-  my $now = time;
+  my $now = Time::HiRes::time;
   my $guard = $self->_guard;
   my $jobs = $guard->_jobs;
   my @ready = sort { $b->{priority} <=> $a->{priority}
-        || $a->{created} <=> $b->{created} }
+        || $a->{id} <=> $b->{id} }
     grep +($_->{state} eq 'inactive' and $queues{$_->{queue}}
         and $tasks->{$_->{task}} and $_->{delayed} <= $now
+        and (not defined $_->{expires} or $_->{expires} > $now)
         and (not defined $options->{id} or $_->{id} eq $options->{id})),
     values %$jobs;
 
@@ -334,15 +363,17 @@ sub _try {
     $job = $candidate and last CANDIDATE
       unless my @parents = @{$candidate->{parents} // []};
     for my $parent (@parents) {
-      next CANDIDATE if exists $jobs->{$parent}
-          and grep +($jobs->{$parent}{state} eq $_), qw(active failed inactive)
+      next unless my $pjob = $jobs->{$parent};
+      next CANDIDATE if $pjob->{state} eq 'active'
+          or ($pjob->{state} eq 'failed' and not $candidate->{lax})
+          or ($pjob->{state} eq 'inactive' and (not defined $pjob->{expires} or $pjob->{expires} > $now));
     }
     $job = $candidate;
   }
 
   return undef unless $job;
   $guard->_write;
-  @$job{qw(started state worker)} = (time, 'active', $id);
+  @$job{qw(started state worker)} = ($now, 'active', $id);
   return $job;
 }
 
@@ -354,13 +385,11 @@ sub _update {
   return undef unless $job->{retries} == $retries;
 
   $guard->_write;
-  @$job{qw(finished result)} = (time, $result);
+  @$job{qw(finished result)} = (Time::HiRes::time, $result);
   $job->{state} = $fail ? 'failed' : 'finished';
   undef $guard;
 
-  return 1 unless $fail and $job->{attempts} > $retries + 1;
-  my $delay = $self->minion->backoff->($retries);
-  return $self->retry_job($id, $retries, {delay => $delay});
+  return $fail ? $self->auto_retry_job($id, $retries, $job->{attempts}) : 1;
 }
 
 sub _worker_info {
@@ -374,12 +403,11 @@ sub _worker_info {
   return {%$worker, jobs => \@jobs};
 }
 
-package
-    Minion::Backend::Storable::_Guard;
+package Minion::Backend::Storable::_Guard;
 use Mojo::Base -base;
 
 use Fcntl ':flock';
-use Digest::MD5 'md5_hex';
+use Time::HiRes ();
 use Storable ();
 
 sub DESTROY {
@@ -409,8 +437,8 @@ sub _children {
 sub _data { $_[0]{data} //= $_[0]->_load($_[0]{backend}->file) }
 
 sub _id {
-  my $id;
-  do { $id = md5_hex(time . rand 999) } while $_[0]->_workers->{$id};
+  my $id = int(Time::HiRes::time * 100000);
+  while ($_[0]->_workers->{$id}) { $id++ };
   return $id;
 }
 
@@ -426,8 +454,8 @@ sub _job_count { $_[0]->_data->{job_count} //= 0 }
 
 sub _job_id {
   my ($self) = @_;
-  my $id;
-  do { $id = md5_hex(time . rand 999) } while $self->_jobs->{$id};
+  my $id = int(Time::HiRes::time * 100000);
+  while ($self->_jobs->{$id}) { $id++ };
   ++$self->_data->{job_count};
   return $id;
 }
@@ -444,8 +472,15 @@ sub _workers { $_[0]->_data->{workers} //= {} }
 
 sub _write { ++$_[0]{write} && return $_[0] }
 
+sub _reset {
+  my ($self, $options) = (@_);
+  if ($options->{all}) { $_[0]{data} = {} }
+  elsif ($options->{locks}) { $self->_data->{locks} = {} }
+}
+
 1;
-__END__
+
+=encoding utf8
 
 =head1 NAME
 
@@ -462,7 +497,7 @@ Minion::Backend::Storable - File backend for Minion job queues.
 L<Minion::Backend::Storable> is a highly portable file-based backend for
 L<Minion>.
 
-This version supports Minion v7.01.
+This version supports Minion v10.13.
 
 =head1 ATTRIBUTES
 
@@ -570,6 +605,20 @@ L<Minion/"backoff"> after the first attempt, defaults to C<1>.
 
 Delay job for this many seconds (from now), defaults to C<0>.
 
+=item expire
+
+  expire => 300
+
+Job is valid for this many seconds (from now) before it expires. Note that this option is B<EXPERIMENTAL> and might
+change without warning!
+
+=item lax
+
+  lax => 1
+
+Existing jobs this job depends on may also have transitioned to the C<failed> state to allow for it to be processed,
+defaults to C<false>. Note that this option is B<EXPERIMENTAL> and might change without warning!
+
 =item notes
 
   notes => {foo => 'bar', baz => [1, 2, 3]}
@@ -580,8 +629,8 @@ Hash reference with arbitrary metadata for this job.
 
   parents => [$id1, $id2, $id3]
 
-One or more existing jobs this job depends on, and that need to have
-transitioned to the state C<finished> before it can be processed.
+One or more existing jobs this job depends on, and that need to have transitioned to the state C<finished> before it
+can be processed.
 
 =item priority
 
@@ -604,9 +653,8 @@ Queue to put job in, defaults to C<default>.
   my $bool = $backend->fail_job(
     $job_id, $retries, {whatever => 'Something went wrong!'});
 
-Transition from C<active> to C<failed> state with or without a result, and if
-there are attempts remaining, transition back to C<inactive> with a delay based
-on L<Minion/"backoff">.
+Transition from C<active> to C<failed> state with or without a result, and if there are attempts remaining, transition
+back to C<inactive> with a delay based on L<Minion/"backoff">.
 
 =head2 finish_job
 
@@ -621,8 +669,7 @@ Transition from C<active> to C<finished> state with or without a result.
 
   my $history = $backend->history;
 
-Get history information for job queue. Note that this method is EXPERIMENTAL and
-might change without warning!
+Get history information for job queue.
 
 These fields are currently available:
 
@@ -658,11 +705,23 @@ These options are currently available:
 
 =over 2
 
+=item before
+
+  before => 23
+
+List only jobs before this id.
+
 =item ids
 
   ids => ['23', '24']
 
 List only jobs with these ids.
+
+=item notes
+
+  notes => ['foo', 'bar']
+
+List only jobs with one of these notes.
 
 =item queues
 
@@ -718,6 +777,12 @@ Epoch time job was created.
 
 Epoch time job was delayed to.
 
+=item expires
+
+  expires => 784111777
+
+Epoch time job is valid until before it expires.
+
 =item finished
 
   finished => 784111777
@@ -729,6 +794,12 @@ Epoch time job was finished.
   id => 10025
 
 Job id.
+
+=item lax
+
+  lax => 0
+
+Existing jobs this job depends on may also have failed to allow for it to be processed.
 
 =item notes
 
@@ -789,6 +860,12 @@ Current job state, usually C<active>, C<failed>, C<finished> or C<inactive>.
   task => 'foo'
 
 Task name.
+
+=item time
+
+  time => 78411177
+
+Server time.
 
 =item worker
 
@@ -860,6 +937,12 @@ These options are currently available:
 
 =over 2
 
+=item before
+
+  before => 23
+
+List only workers before this id.
+
 =item ids
 
   ids => ['23', '24']
@@ -921,9 +1004,8 @@ Hash reference with whatever status information the worker would like to share.
   my $bool = $backend->lock('foo', 3600);
   my $bool = $backend->lock('foo', 3600, {limit => 20});
 
-Try to acquire a named lock that will expire automatically after the given
-amount of time in seconds. An expiration time of C<0> can be used to check if a
-named lock already exists without creating one.
+Try to acquire a named lock that will expire automatically after the given amount of time in seconds. An expiration
+time of C<0> can be used to check if a named lock already exists without creating one.
 
 These options are currently available:
 
@@ -933,8 +1015,7 @@ These options are currently available:
 
   limit => 20
 
-Number of shared locks with the same name that can be active at the same time,
-defaults to C<1>.
+Number of shared locks with the same name that can be active at the same time, defaults to C<1>.
 
 =back
 
@@ -948,7 +1029,7 @@ Construct a new L<Minion::Backend::Storable> object.
 
   my $bool = $backend->note($job_id, {mojo => 'rocks', minion => 'too'});
 
-Change one or more metadata fields for a job.
+Change one or more metadata fields for a job. Setting a value to C<undef> will remove the field.
 
 =head2 receive
 
@@ -991,17 +1072,34 @@ Repair worker registry and job queue if necessary.
 
 =head2 reset
 
-  $backend->reset;
+  $backend->reset({all => 1});
 
 Reset job queue.
+
+These options are currently available:
+
+=over 2
+
+=item all
+
+  all => 1
+
+Reset everything.
+
+=item locks
+
+  locks => 1
+
+Reset only locks.
+
+=back
 
 =head2 retry_job
 
   my $bool = $backend->retry_job($job_id, $retries);
   my $bool = $backend->retry_job($job_id, $retries, {delay => 10});
 
-Transition job back to C<inactive> state, already C<inactive> jobs may also be
-retried to change options.
+Transition job back to C<inactive> state, already C<inactive> jobs may also be retried to change options.
 
 These options are currently available:
 
@@ -1018,6 +1116,20 @@ Number of times performing this job will be attempted.
   delay => 10
 
 Delay job for this many seconds (from now), defaults to C<0>.
+
+=item expire
+
+  expire => 300
+
+Job is valid for this many seconds (from now) before it expires. Note that this option is B<EXPERIMENTAL> and might
+change without warning!
+
+=item lax
+
+  lax => 1
+
+Existing jobs this job depends on may also have transitioned to the C<failed> state to allow for it to be processed,
+defaults to C<false>. Note that this option is B<EXPERIMENTAL> and might change without warning!
 
 =item parents
 
@@ -1071,16 +1183,13 @@ Number of workers that are currently processing a job.
 
   delayed_jobs => 100
 
-Number of jobs in C<inactive> state that are scheduled to run at specific time
-in the future. Note that this field is EXPERIMENTAL and might change without
-warning!
+Number of jobs in C<inactive> state that are scheduled to run at specific time in the future.
 
 =item enqueued_jobs
 
   enqueued_jobs => 100000
 
-Rough estimate of how many jobs have ever been enqueued. Note that this field is
-EXPERIMENTAL and might change without warning!
+Rough estimate of how many jobs have ever been enqueued.
 
 =item failed_jobs
 
