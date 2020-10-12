@@ -81,7 +81,7 @@ sub history {
     for (reverse(1..24));
   my $min = $daily[0]->{epoch} + 1;
   for my $job (values %$jobs) {
-    next if ($job->{finished} < $min);
+    next if (not defined $job->{finished} or $job->{finished} < $min);
     my $ix = int(($job->{finished} - $min) / 60 / 60);
     my $elem = $daily[$ix];
     ++$elem->{finished_jobs} if ($job->{state} eq 'finished');
